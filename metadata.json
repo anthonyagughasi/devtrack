@@ -1,0 +1,6 @@
+{
+  "name": "DevTrack",
+  "description": "Project management and team collaboration platform built for software engineering teams, freelancers, and development agencies.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
