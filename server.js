@@ -13,10 +13,6 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { ZodError } from "zod";
 
-// src/lib/firebase-admin.ts
-import { initializeApp, getApps } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
-
 // firebase-applet-config.json
 var firebase_applet_config_default = {
   projectId: "spatial-campaign-nlvvl",
@@ -32,6 +28,8 @@ var firebase_applet_config_default = {
 };
 
 // src/lib/firebase-admin.ts
+import { initializeApp, getApps } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 if (!getApps().length) {
   initializeApp({
     projectId: firebase_applet_config_default.projectId
@@ -158,6 +156,76 @@ var AppError = class extends Error {
 };
 function isAppError(error) {
   return error instanceof AppError;
+}
+function extractDatabaseErrorDetails(error) {
+  const queue = [error];
+  const seen = /* @__PURE__ */ new Set();
+  let fallbackMessage = error instanceof Error ? error.message : String(error ?? "");
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    const record = current;
+    if (typeof record.message === "string" && record.message.trim() && !fallbackMessage) {
+      fallbackMessage = record.message.trim();
+    }
+    if (typeof record.code === "string" && record.code.trim()) {
+      return {
+        code: record.code.trim(),
+        constraint: typeof record.constraint === "string" ? record.constraint : void 0,
+        message: typeof record.message === "string" ? record.message : fallbackMessage
+      };
+    }
+    if (record.cause) queue.push(record.cause);
+    if (Array.isArray(record.errors)) {
+      for (const inner of record.errors) {
+        queue.push(inner);
+      }
+    }
+  }
+  return { message: fallbackMessage };
+}
+function mapDatabaseError(error, options) {
+  if (isAppError(error)) return error;
+  const details = extractDatabaseErrorDetails(error);
+  const code = details.code ?? "";
+  const lowerMsg = details.message.toLowerCase();
+  if (code === "23505") {
+    return new AppError(
+      409,
+      options?.duplicateMessage ?? "A record with this unique value already exists.",
+      { cause: error }
+    );
+  }
+  if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "ETIMEDOUT" || code === "ECONNRESET" || code === "EHOSTUNREACH" || code === "ENETUNREACH" || code === "ENOENT" || code === "57P01" || code === "57P03" || lowerMsg.includes("connection terminated") || lowerMsg.includes("timeout exceeded when trying to connect")) {
+    return new AppError(
+      503,
+      "Database service is unavailable. Verify DATABASE_URL or SQL_* connection settings and network access.",
+      { cause: error }
+    );
+  }
+  if (code === "28P01" || code === "28000") {
+    return new AppError(
+      503,
+      "Database authentication failed. Check the database credentials in server environment variables.",
+      { cause: error }
+    );
+  }
+  if (code === "3D000") {
+    return new AppError(
+      503,
+      "Configured database does not exist. Verify SQL_DB_NAME or DATABASE_URL.",
+      { cause: error }
+    );
+  }
+  if (code === "42P01") {
+    return new AppError(
+      503,
+      "Database tables are not initialized. Push the schema to the configured PostgreSQL database.",
+      { cause: error }
+    );
+  }
+  return null;
 }
 
 // src/server/services/auth.ts
@@ -531,15 +599,53 @@ var notificationsRelations = relations(notifications, ({ one }) => ({
 }));
 
 // src/db/index.ts
+function getConnectionString() {
+  const url = process.env.DATABASE_URL?.trim() || process.env.POSTGRES_URL?.trim();
+  return url || void 0;
+}
+function getDatabaseConfigurationError() {
+  const connectionString = getConnectionString();
+  if (connectionString) {
+    return null;
+  }
+  const sqlHost = process.env.SQL_HOST?.trim();
+  const sqlUser = process.env.SQL_USER?.trim();
+  const sqlDbName = process.env.SQL_DB_NAME?.trim();
+  if (process.env.VERCEL && sqlHost?.startsWith("/cloudsql/")) {
+    return "Cloud SQL Auth Proxy Unix sockets (/cloudsql/...) are not reachable from Vercel. Set DATABASE_URL or an externally reachable PostgreSQL SQL_HOST in Vercel environment variables.";
+  }
+  if (!sqlHost || !sqlUser || !sqlDbName) {
+    return "Database connection is not configured for this environment. Set DATABASE_URL (or SQL_HOST, SQL_USER, SQL_PASSWORD, and SQL_DB_NAME) in server environment variables.";
+  }
+  return null;
+}
+function assertDatabaseConfigured() {
+  const configError = getDatabaseConfigurationError();
+  if (configError) {
+    throw new AppError(503, configError);
+  }
+}
 var createPool = () => {
   if (!global._postgresPool) {
+    const connectionString = getConnectionString();
+    const sqlHost = process.env.SQL_HOST?.trim();
+    const isRemoteTcpHost = Boolean(
+      sqlHost && !sqlHost.startsWith("/") && sqlHost !== "localhost" && sqlHost !== "127.0.0.1"
+    );
+    const shouldUseSsl = process.env.SQL_SSL === "true" || process.env.SQL_SSL !== "false" && (isRemoteTcpHost || Boolean(
+      connectionString && !connectionString.includes("localhost") && !connectionString.includes("127.0.0.1")
+    ));
     global._postgresPool = new Pool({
-      host: process.env.SQL_HOST,
-      user: process.env.SQL_USER,
-      password: process.env.SQL_PASSWORD,
-      database: process.env.SQL_DB_NAME,
-      max: 10,
-      connectionTimeoutMillis: 15e3
+      ...connectionString ? { connectionString } : {
+        host: sqlHost,
+        port: process.env.SQL_PORT ? Number(process.env.SQL_PORT) : void 0,
+        user: process.env.SQL_USER?.trim(),
+        password: process.env.SQL_PASSWORD,
+        database: process.env.SQL_DB_NAME?.trim()
+      },
+      ssl: shouldUseSsl ? { rejectUnauthorized: false } : void 0,
+      max: process.env.VERCEL ? 3 : 10,
+      connectionTimeoutMillis: 5e3
     });
     global._postgresPool.on("error", (err) => {
       console.error("Unexpected error on idle SQL pool client:", err);
@@ -1616,6 +1722,7 @@ function sanitizeUser(row) {
 }
 async function getOrCreateUser(uid, email, name, avatar, markEmailVerified = false) {
   try {
+    assertDatabaseConfigured();
     const cleanEmail = email.trim().toLowerCase();
     const displayName = name?.trim() || cleanEmail.split("@")[0] || "Developer";
     const byUid = await db.select().from(users).where(eq5(users.uid, uid)).limit(1);
@@ -1666,6 +1773,8 @@ async function getOrCreateUser(uid, email, name, avatar, markEmailVerified = fal
     throw new AppError(500, "Failed to synchronize user profile.");
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error("Failed to upsert user:", error);
     throw new AppError(500, "Failed to synchronize user profile.", { cause: error });
   }
@@ -1711,7 +1820,7 @@ async function updateUserAvatar(userId, avatarDataUri) {
 }
 
 // src/server/services/auth.ts
-var BCRYPT_ROUNDS = 12;
+var BCRYPT_ROUNDS = 10;
 var SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
 var RESET_TOKEN_TTL_MS = 60 * 60 * 1e3;
 var VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1e3;
@@ -1731,12 +1840,13 @@ async function verifyPassword(plain, hash) {
 function isEmailVerificationEnforced() {
   return false;
 }
-async function createSessionRecord(userId, userAgent) {
+async function createSessionRecord(userId, userAgent, executor = db) {
   try {
+    assertDatabaseConfigured();
     const rawToken = generateSecureToken();
     const tokenHash = hashToken(rawToken);
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-    await db.insert(sessions).values({
+    await executor.insert(sessions).values({
       userId,
       tokenHash,
       expiresAt,
@@ -1744,39 +1854,51 @@ async function createSessionRecord(userId, userAgent) {
     });
     return rawToken;
   } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error("Failed to create database session:", error);
     throw new AppError(500, "Failed to create authentication session.", { cause: error });
   }
 }
 async function getUserBySessionToken(rawToken) {
   try {
+    assertDatabaseConfigured();
     const tokenHash = hashToken(rawToken);
     const rows = await db.select({ user: users }).from(sessions).innerJoin(users, eq6(sessions.userId, users.id)).where(and5(eq6(sessions.tokenHash, tokenHash), gt2(sessions.expiresAt, /* @__PURE__ */ new Date()))).limit(1);
     if (rows.length === 0) return null;
     return sanitizeUser(rows[0].user);
   } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error("Failed to validate session:", error);
     throw new AppError(500, "Failed to validate session.", { cause: error });
   }
 }
 async function deleteSessionByToken(rawToken) {
   try {
+    assertDatabaseConfigured();
     const tokenHash = hashToken(rawToken);
     await db.delete(sessions).where(eq6(sessions.tokenHash, tokenHash));
   } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error("Failed to delete session:", error);
     throw new AppError(500, "Failed to sign out cleanly.", { cause: error });
   }
 }
 async function registerWithEmail(input) {
   try {
+    assertDatabaseConfigured();
     const cleanEmail = input.email.trim().toLowerCase();
     const [existing] = await db.select({ id: users.id }).from(users).where(eq6(users.email, cleanEmail)).limit(1);
     if (existing) {
       throw new AppError(409, "An account with this email address already exists.");
     }
     const passwordHash = await hashPassword(input.password);
-    const createdUser = await db.transaction(async (tx) => {
+    const { createdUser, sessionToken } = await db.transaction(async (tx) => {
       const [inserted] = await tx.insert(users).values({
         uid: `local_${crypto2.randomUUID()}`,
         name: input.name.trim(),
@@ -1785,9 +1907,9 @@ async function registerWithEmail(input) {
         emailVerifiedAt: null
       }).returning();
       await syncPendingInvitationNotificationsForUser(tx, inserted.id);
-      return inserted;
+      const token = await createSessionRecord(inserted.id, input.userAgent, tx);
+      return { createdUser: inserted, sessionToken: token };
     });
-    const sessionToken = await createSessionRecord(createdUser.id, input.userAgent);
     return {
       user: sanitizeUser(createdUser),
       requiresVerification: false,
@@ -1797,12 +1919,20 @@ async function registerWithEmail(input) {
     };
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error, {
+      duplicateMessage: "An account with this email address already exists."
+    });
+    if (mapped) {
+      console.error("Email registration database error:", error);
+      throw mapped;
+    }
     console.error("Email registration failed:", error);
     throw new AppError(500, "Failed to create account.", { cause: error });
   }
 }
 async function loginWithEmail(input) {
   try {
+    assertDatabaseConfigured();
     const cleanEmail = input.email.trim().toLowerCase();
     const [user] = await db.select().from(users).where(eq6(users.email, cleanEmail)).limit(1);
     if (!user || !user.passwordHash) {
@@ -1820,12 +1950,18 @@ async function loginWithEmail(input) {
     };
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) {
+      console.error("Email login database error:", error);
+      throw mapped;
+    }
     console.error("Email login failed:", error);
     throw new AppError(500, "Authentication failed.", { cause: error });
   }
 }
 async function authenticateWithGoogleToken(decoded, userAgent) {
   try {
+    assertDatabaseConfigured();
     const email = decoded.email || `${decoded.uid}@users.devtrack.app`;
     const isVerified = Boolean(decoded.email_verified);
     const user = await getOrCreateUser(
@@ -1845,6 +1981,11 @@ async function authenticateWithGoogleToken(decoded, userAgent) {
     return { user, sessionToken };
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) {
+      console.error("Google OAuth database error:", error);
+      throw mapped;
+    }
     console.error("Google OAuth session creation failed:", error);
     throw new AppError(500, "Failed to complete Google authentication.", {
       cause: error
@@ -3243,31 +3384,38 @@ function detectImageMimeType(buf) {
 var __filename = fileURLToPath(import.meta.url);
 var __dirname = path.dirname(__filename);
 function isGoogleOAuthConfigured() {
-  try {
-    const configPath = path.resolve(__dirname, "firebase-applet-config.json");
-    if (!fs.existsSync(configPath)) return false;
-    const raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    return Boolean(raw.apiKey && raw.projectId && raw.oAuthClientId);
-  } catch {
-    return false;
-  }
+  return Boolean(
+    firebase_applet_config_default.apiKey && firebase_applet_config_default.projectId && firebase_applet_config_default.oAuthClientId
+  );
 }
 var app = express();
 app.set("trust proxy", 1);
+app.use((req, _res, next) => {
+  const mutableReq = req;
+  if (mutableReq.body !== void 0 && mutableReq.readableEnded) {
+    mutableReq._body = true;
+  }
+  next();
+});
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 function isHttpsRequest(req) {
   const forwardedProto = req.headers["x-forwarded-proto"];
-  const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
-  return req.secure || proto === "https" || (process.env.APP_URL?.trim().startsWith("https://") ?? false);
+  const rawProto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  const proto = rawProto?.split(",")[0]?.trim().toLowerCase();
+  return req.secure || proto === "https" || Boolean(process.env.VERCEL) || (process.env.APP_URL?.trim().startsWith("https://") ?? false);
 }
 function getBaseUrl(req) {
   const configured = process.env.APP_URL?.trim().replace(/\/$/, "");
   if (configured && configured !== "MY_APP_URL") {
     return configured;
   }
+  const host = req.get("host");
+  if (!host) {
+    return "http://localhost:3000";
+  }
   const proto = isHttpsRequest(req) ? "https" : req.protocol;
-  return `${proto}://${req.get("host")}`;
+  return `${proto}://${host}`;
 }
 function setSessionCookie(res, req, rawToken) {
   const isHttps = isHttpsRequest(req);
@@ -3895,7 +4043,14 @@ async function startServer() {
     });
   });
 }
-startServer().catch((err) => {
-  console.error("Failed to start server:", err);
-  process.exit(1);
-});
+var server_default = app;
+if (!process.env.VERCEL && !process.env.VITEST) {
+  startServer().catch((err) => {
+    console.error("Failed to start server:", err);
+    process.exit(1);
+  });
+}
+export {
+  app,
+  server_default as default
+};
