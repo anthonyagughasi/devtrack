@@ -55,6 +55,31 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const SESSION_HINT_KEY = 'devtrack_session_hint';
+
+function hasSessionHint(): boolean {
+  try {
+    return window.localStorage.getItem(SESSION_HINT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function markSessionHint(): void {
+  try {
+    window.localStorage.setItem(SESSION_HINT_KEY, '1');
+  } catch {
+    // Ignore storage errors in restricted private browsing modes
+  }
+}
+
+function clearSessionHint(): void {
+  try {
+    window.localStorage.removeItem(SESSION_HINT_KEY);
+  } catch {
+    // Ignore storage errors in restricted private browsing modes
+  }
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
@@ -77,6 +102,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const syncInFlightRef = useRef<Promise<void> | null>(null);
+  const firebaseSyncInFlightRef = useRef<Promise<void> | null>(null);
+  const initializedRef = useRef(false);
   const signingOutRef = useRef(false);
 
   const syncProfile = useCallback(
@@ -88,11 +115,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const promise = (async () => {
         try {
           const data = await apiFetch<{ user: UserProfile }>('/api/me');
+          markSessionHint();
           setProfile(data.user);
           applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
           setAuthError(null);
         } catch (err) {
           if (err instanceof ApiError && err.status === 401 && silent401) {
+            clearSessionHint();
             setProfile(null);
             applyTheme('dark');
             setAuthError(null);
@@ -113,6 +142,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [applyTheme]
   );
 
+  const syncFirebaseUser = useCallback(
+    async (user: FirebaseUser) => {
+      if (firebaseSyncInFlightRef.current) {
+        return firebaseSyncInFlightRef.current;
+      }
+
+      const promise = (async () => {
+        try {
+          const idToken = await user.getIdToken();
+          const data = await apiFetch<{ user: UserProfile }>('/api/auth/google', {
+            method: 'POST',
+            body: JSON.stringify({ idToken }),
+          });
+          markSessionHint();
+          setProfile(data.user);
+          applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
+          setAuthError(null);
+        } catch (err) {
+          if (hasSessionHint()) {
+            await syncProfile(true);
+          }
+          if (err instanceof ApiError && (err.status === 404 || err.status >= 500)) {
+            setAuthError(err.message);
+          }
+        } finally {
+          firebaseSyncInFlightRef.current = null;
+        }
+      })();
+
+      firebaseSyncInFlightRef.current = promise;
+      return promise;
+    },
+    [applyTheme, syncProfile]
+  );
+
   useEffect(() => {
     let active = true;
 
@@ -124,8 +188,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Non-fatal fallback to defaults
       }
 
-      await syncProfile(true);
-      if (active) setLoading(false);
+      try {
+        await auth.authStateReady();
+      } catch {
+        // Continue with session-hint check if Firebase Auth readiness fails
+      }
+
+      if (!active) return;
+
+      const currentUser = auth.currentUser;
+      setFirebaseUser(currentUser);
+
+      if (currentUser && !signingOutRef.current) {
+        await syncFirebaseUser(currentUser);
+      } else if (hasSessionHint()) {
+        await syncProfile(true);
+      } else {
+        setProfile(null);
+        applyTheme('dark');
+        setAuthError(null);
+      }
+
+      if (active) {
+        initializedRef.current = true;
+        setLoading(false);
+      }
     };
 
     init();
@@ -134,25 +221,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!active) return;
       setFirebaseUser(user);
+      if (!initializedRef.current) return;
       if (user && !signingOutRef.current) {
-        try {
-          const idToken = await user.getIdToken();
-          const data = await apiFetch<{ user: UserProfile }>('/api/auth/google', {
-            method: 'POST',
-            body: JSON.stringify({ idToken }),
-          });
-          if (!active) return;
-          setProfile(data.user);
-          applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
-          setAuthError(null);
-        } catch (err) {
-          if (!active) return;
-          // Fall back to /api/me if cookie session exists
-          await syncProfile(true);
-          if (err instanceof ApiError && err.status >= 500) {
-            setAuthError(err.message);
-          }
-        }
+        await syncFirebaseUser(user);
       }
     });
 
@@ -160,7 +231,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       active = false;
       unsub();
     };
-  }, [syncProfile, applyTheme]);
+  }, [syncProfile, syncFirebaseUser, applyTheme]);
 
   const signInWithGoogle = useCallback(async () => {
     setAuthError(null);
@@ -178,6 +249,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         method: 'POST',
         body: JSON.stringify({ idToken }),
       });
+      markSessionHint();
       setProfile(data.user);
       applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
       setAuthError(null);
@@ -201,6 +273,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         method: 'POST',
         body: JSON.stringify({ email, password }),
       });
+      markSessionHint();
       setProfile(data.user);
       applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
       return data.user;
@@ -221,6 +294,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         body: JSON.stringify(input),
       });
       if (!result.requiresVerification) {
+        markSessionHint();
         setProfile(result.user);
         applyTheme(result.user.themePreference === 'light' ? 'light' : 'dark');
       }
@@ -237,6 +311,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await firebaseSignOut(auth).catch(() => undefined);
       }
     } finally {
+      clearSessionHint();
       setProfile(null);
       setFirebaseUser(null);
       setAuthError(null);

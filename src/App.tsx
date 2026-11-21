@@ -63,7 +63,7 @@ function authRouteToPath(route: AuthRoute, token?: string): string {
 }
 
 function WorkspaceRouter() {
-  const { profile, loading, authError, refreshProfile, signOut } = useAuth();
+  const { profile, loading, authError, refreshProfile, signOut, clearAuthError } = useAuth();
   const [route, setRoute] = useState<NavRoute>('dashboard');
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
   const [initialTaskId, setInitialTaskId] = useState<number | undefined>(undefined);
@@ -83,12 +83,13 @@ function WorkspaceRouter() {
   }, []);
 
   const navigateAuth = useCallback((next: AuthRoute, token?: string) => {
+    clearAuthError();
     const nextUrl = authRouteToPath(next, token);
     if (window.location.pathname + window.location.search !== nextUrl) {
       window.history.pushState({}, '', nextUrl);
     }
     setAuthLoc({ route: next, token });
-  }, []);
+  }, [clearAuthError]);
 
   // Normalize /login, /register, /forgot-password URL once authenticated
   useEffect(() => {

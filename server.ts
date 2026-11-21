@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { ZodError } from 'zod';
+import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
 import { adminAuth } from './src/lib/firebase-admin.ts';
 import {
   acceptInvitationSchema,
@@ -117,18 +118,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 function isGoogleOAuthConfigured(): boolean {
-  try {
-    const configPath = path.resolve(__dirname, 'firebase-applet-config.json');
-    if (!fs.existsSync(configPath)) return false;
-    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as {
-      apiKey?: string;
-      projectId?: string;
-      oAuthClientId?: string;
-    };
-    return Boolean(raw.apiKey && raw.projectId && raw.oAuthClientId);
-  } catch {
-    return false;
-  }
+  return Boolean(
+    firebaseConfig.apiKey &&
+      firebaseConfig.projectId &&
+      firebaseConfig.oAuthClientId
+  );
 }
 
 const app = express();
@@ -884,7 +878,12 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+export { app };
+export default app;
+
+if (!process.env.VERCEL && !process.env.VITEST) {
+  startServer().catch((err) => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}
