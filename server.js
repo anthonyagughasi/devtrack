@@ -13,226 +13,6 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { ZodError } from "zod";
 
-// firebase-applet-config.json
-var firebase_applet_config_default = {
-  projectId: "spatial-campaign-nlvvl",
-  appId: "1:585554483367:web:9f176af4b70a7410b1a382",
-  apiKey: "AIzaSyALoDE5th1p03l9RBimh-rX-TTmm0SLhVs",
-  authDomain: "spatial-campaign-nlvvl.firebaseapp.com",
-  firestoreDatabaseId: "ai-studio-4e7b9940-78ae-415f-b5d7-c78ccb48710d",
-  storageBucket: "spatial-campaign-nlvvl.firebasestorage.app",
-  messagingSenderId: "585554483367",
-  measurementId: "",
-  oAuthClientId: "585554483367-mjnf856ig9lcpkki3avttcbcf0ni7f7d.apps.googleusercontent.com",
-  recaptchaSiteKey: ""
-};
-
-// src/lib/firebase-admin.ts
-import { initializeApp, getApps } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
-if (!getApps().length) {
-  initializeApp({
-    projectId: firebase_applet_config_default.projectId
-  });
-}
-var adminAuth = getAuth();
-
-// src/lib/validations.ts
-import { z } from "zod";
-var PROJECT_STATUSES = [
-  "PLANNING",
-  "ACTIVE",
-  "ON_HOLD",
-  "COMPLETED",
-  "ARCHIVED"
-];
-var TASK_STATUSES = ["TODO", "IN_PROGRESS", "COMPLETED"];
-var TASK_PRIORITIES = ["LOW", "MEDIUM", "HIGH", "URGENT"];
-var createProjectSchema = z.object({
-  name: z.string().trim().min(2, "Project name must be at least 2 characters").max(120),
-  description: z.string().trim().max(2e3).optional().default(""),
-  status: z.enum(PROJECT_STATUSES).optional().default("PLANNING"),
-  startDate: z.string().nullable().optional(),
-  deadline: z.string().nullable().optional()
-});
-var updateProjectSchema = z.object({
-  name: z.string().trim().min(2, "Project name must be at least 2 characters").max(120).optional(),
-  description: z.string().trim().max(2e3).optional(),
-  status: z.enum(PROJECT_STATUSES).optional(),
-  startDate: z.string().nullable().optional(),
-  deadline: z.string().nullable().optional()
-});
-var createTaskSchema = z.object({
-  projectId: z.coerce.number().int().positive("Project is required"),
-  title: z.string().trim().min(2, "Task title must be at least 2 characters").max(200),
-  description: z.string().trim().max(4e3).optional().default(""),
-  status: z.enum(TASK_STATUSES).optional().default("TODO"),
-  priority: z.enum(TASK_PRIORITIES).optional().default("MEDIUM"),
-  dueDate: z.string().nullable().optional(),
-  assigneeId: z.coerce.number().int().positive().nullable().optional()
-});
-var updateTaskSchema = z.object({
-  title: z.string().trim().min(2, "Task title must be at least 2 characters").max(200).optional(),
-  description: z.string().trim().max(4e3).optional(),
-  status: z.enum(TASK_STATUSES).optional(),
-  priority: z.enum(TASK_PRIORITIES).optional(),
-  dueDate: z.string().nullable().optional(),
-  assigneeId: z.coerce.number().int().positive().nullable().optional(),
-  position: z.coerce.number().int().min(0).optional()
-});
-var moveTaskSchema = z.object({
-  status: z.enum(TASK_STATUSES),
-  position: z.coerce.number().int().min(0).default(0)
-});
-var commentSchema = z.object({
-  content: z.string().trim().min(1, "Comment cannot be empty").max(2e3)
-});
-var inviteMemberSchema = z.object({
-  email: z.string().trim().email("Valid email address is required").toLowerCase(),
-  role: z.enum(["ADMINISTRATOR", "MEMBER"]).default("MEMBER")
-});
-var updateMemberRoleSchema = z.object({
-  role: z.enum(["ADMINISTRATOR", "MEMBER"])
-});
-var updateUserSettingsSchema = z.object({
-  name: z.string().trim().min(2, "Display name must be at least 2 characters").max(80).optional(),
-  avatar: z.string().trim().max(500).nullable().optional(),
-  themePreference: z.enum(["dark", "light"]).optional(),
-  notifyOnAssign: z.boolean().optional(),
-  notifyOnComment: z.boolean().optional(),
-  notifyOnInvite: z.boolean().optional(),
-  notifyOnDeadline: z.boolean().optional()
-});
-var acceptInvitationSchema = z.object({
-  token: z.string().trim().min(8, "Invitation token is required")
-});
-var strongPasswordSchema = z.string().min(8, "Password must be at least 8 characters").max(128, "Password must be at most 128 characters").regex(/[A-Z]/, "Password must include at least one uppercase letter").regex(/[a-z]/, "Password must include at least one lowercase letter").regex(/[0-9]/, "Password must include at least one number");
-var registerSchema = z.object({
-  name: z.string().trim().min(2, "Full name must be at least 2 characters").max(80),
-  email: z.string().trim().email("Valid email address is required").toLowerCase(),
-  password: strongPasswordSchema,
-  confirmPassword: z.string().min(1, "Please confirm your password")
-}).refine((data) => data.password === data.confirmPassword, {
-  message: "Passwords do not match",
-  path: ["confirmPassword"]
-});
-var loginSchema = z.object({
-  email: z.string().trim().email("Valid email address is required").toLowerCase(),
-  password: z.string().min(1, "Password is required")
-});
-var forgotPasswordSchema = z.object({
-  email: z.string().trim().email("Valid email address is required").toLowerCase()
-});
-var resetPasswordSchema = z.object({
-  token: z.string().trim().min(16, "Reset token is invalid"),
-  password: strongPasswordSchema,
-  confirmPassword: z.string().min(1, "Please confirm your password")
-}).refine((data) => data.password === data.confirmPassword, {
-  message: "Passwords do not match",
-  path: ["confirmPassword"]
-});
-var verifyEmailSchema = z.object({
-  token: z.string().trim().min(16, "Verification token is invalid")
-});
-var resendVerificationSchema = z.object({
-  email: z.string().trim().email("Valid email address is required").toLowerCase()
-});
-var changePasswordSchema = z.object({
-  currentPassword: z.string().optional().default(""),
-  newPassword: strongPasswordSchema,
-  confirmPassword: z.string().min(1, "Please confirm your new password")
-}).refine((data) => data.newPassword === data.confirmPassword, {
-  message: "Passwords do not match",
-  path: ["confirmPassword"]
-});
-
-// src/server/errors.ts
-var AppError = class extends Error {
-  constructor(statusCode, message, options) {
-    super(message, options);
-    this.statusCode = statusCode;
-    this.name = "AppError";
-  }
-};
-function isAppError(error) {
-  return error instanceof AppError;
-}
-function extractDatabaseErrorDetails(error) {
-  const queue = [error];
-  const seen = /* @__PURE__ */ new Set();
-  let fallbackMessage = error instanceof Error ? error.message : String(error ?? "");
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (!current || typeof current !== "object" || seen.has(current)) continue;
-    seen.add(current);
-    const record = current;
-    if (typeof record.message === "string" && record.message.trim() && !fallbackMessage) {
-      fallbackMessage = record.message.trim();
-    }
-    if (typeof record.code === "string" && record.code.trim()) {
-      return {
-        code: record.code.trim(),
-        constraint: typeof record.constraint === "string" ? record.constraint : void 0,
-        message: typeof record.message === "string" ? record.message : fallbackMessage
-      };
-    }
-    if (record.cause) queue.push(record.cause);
-    if (Array.isArray(record.errors)) {
-      for (const inner of record.errors) {
-        queue.push(inner);
-      }
-    }
-  }
-  return { message: fallbackMessage };
-}
-function mapDatabaseError(error, options) {
-  if (isAppError(error)) return error;
-  const details = extractDatabaseErrorDetails(error);
-  const code = details.code ?? "";
-  const lowerMsg = details.message.toLowerCase();
-  if (code === "23505") {
-    return new AppError(
-      409,
-      options?.duplicateMessage ?? "A record with this unique value already exists.",
-      { cause: error }
-    );
-  }
-  if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "ETIMEDOUT" || code === "ECONNRESET" || code === "EHOSTUNREACH" || code === "ENETUNREACH" || code === "ENOENT" || code === "57P01" || code === "57P03" || lowerMsg.includes("connection terminated") || lowerMsg.includes("timeout exceeded when trying to connect")) {
-    return new AppError(
-      503,
-      "Database service is unavailable. Verify DATABASE_URL or SQL_* connection settings and network access.",
-      { cause: error }
-    );
-  }
-  if (code === "28P01" || code === "28000") {
-    return new AppError(
-      503,
-      "Database authentication failed. Check the database credentials in server environment variables.",
-      { cause: error }
-    );
-  }
-  if (code === "3D000") {
-    return new AppError(
-      503,
-      "Configured database does not exist. Verify SQL_DB_NAME or DATABASE_URL.",
-      { cause: error }
-    );
-  }
-  if (code === "42P01") {
-    return new AppError(
-      503,
-      "Database tables are not initialized. Push the schema to the configured PostgreSQL database.",
-      { cause: error }
-    );
-  }
-  return null;
-}
-
-// src/server/services/auth.ts
-import bcrypt from "bcryptjs";
-import crypto2 from "crypto";
-import { and as and5, eq as eq6, gt as gt2, isNull } from "drizzle-orm";
-
 // src/db/index.ts
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
@@ -598,24 +378,106 @@ var notificationsRelations = relations(notifications, ({ one }) => ({
   })
 }));
 
+// src/server/errors.ts
+var AppError = class extends Error {
+  constructor(statusCode, message, options) {
+    super(message, options);
+    this.statusCode = statusCode;
+    this.name = "AppError";
+  }
+};
+function isAppError(error) {
+  return error instanceof AppError;
+}
+function extractDatabaseErrorDetails(error) {
+  const queue = [error];
+  const seen = /* @__PURE__ */ new Set();
+  let fallbackMessage = error instanceof Error ? error.message : String(error ?? "");
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    const record = current;
+    if (typeof record.message === "string" && record.message.trim() && !fallbackMessage) {
+      fallbackMessage = record.message.trim();
+    }
+    if (typeof record.code === "string" && record.code.trim()) {
+      return {
+        code: record.code.trim(),
+        constraint: typeof record.constraint === "string" ? record.constraint : void 0,
+        message: typeof record.message === "string" ? record.message : fallbackMessage
+      };
+    }
+    if (record.cause) queue.push(record.cause);
+    if (Array.isArray(record.errors)) {
+      for (const inner of record.errors) {
+        queue.push(inner);
+      }
+    }
+  }
+  return { message: fallbackMessage };
+}
+function mapDatabaseError(error, options) {
+  if (isAppError(error)) return error;
+  const details = extractDatabaseErrorDetails(error);
+  const code = details.code ?? "";
+  const lowerMsg = details.message.toLowerCase();
+  if (code === "23505") {
+    return new AppError(
+      409,
+      options?.duplicateMessage ?? "A record with this unique value already exists.",
+      { cause: error }
+    );
+  }
+  if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "ETIMEDOUT" || code === "ECONNRESET" || code === "EHOSTUNREACH" || code === "ENETUNREACH" || code === "ENOENT" || code === "57P01" || code === "57P03" || lowerMsg.includes("connection terminated") || lowerMsg.includes("timeout exceeded when trying to connect")) {
+    return new AppError(
+      503,
+      "Database service is unavailable. Verify your Neon DATABASE_URL connection settings and network access.",
+      { cause: error }
+    );
+  }
+  if (code === "28P01" || code === "28000") {
+    return new AppError(
+      503,
+      "Database authentication failed. Check the credentials in DATABASE_URL.",
+      { cause: error }
+    );
+  }
+  if (code === "3D000") {
+    return new AppError(
+      503,
+      "Configured database does not exist. Verify DATABASE_URL.",
+      { cause: error }
+    );
+  }
+  if (code === "42P01") {
+    return new AppError(
+      503,
+      "Database tables are not initialized. Push the schema to the configured PostgreSQL database.",
+      { cause: error }
+    );
+  }
+  return null;
+}
+
 // src/db/index.ts
-function getConnectionString() {
-  const url = process.env.DATABASE_URL?.trim() || process.env.POSTGRES_URL?.trim();
+function getDatabaseUrl() {
+  const url = process.env.DATABASE_URL?.trim();
   return url || void 0;
 }
 function getDatabaseConfigurationError() {
-  const connectionString = getConnectionString();
-  if (connectionString) {
-    return null;
+  const connectionString = getDatabaseUrl();
+  if (!connectionString) {
+    return "Database connection is not configured. Set DATABASE_URL to your Neon PostgreSQL connection string in environment variables.";
   }
-  const sqlHost = process.env.SQL_HOST?.trim();
-  const sqlUser = process.env.SQL_USER?.trim();
-  const sqlDbName = process.env.SQL_DB_NAME?.trim();
-  if (process.env.VERCEL && sqlHost?.startsWith("/cloudsql/")) {
-    return "Cloud SQL Auth Proxy Unix sockets (/cloudsql/...) are not reachable from Vercel. Set DATABASE_URL or an externally reachable PostgreSQL SQL_HOST in Vercel environment variables.";
+  let parsed;
+  try {
+    parsed = new URL(connectionString);
+  } catch {
+    return "DATABASE_URL is not a valid PostgreSQL connection URL.";
   }
-  if (!sqlHost || !sqlUser || !sqlDbName) {
-    return "Database connection is not configured for this environment. Set DATABASE_URL (or SQL_HOST, SQL_USER, SQL_PASSWORD, and SQL_DB_NAME) in server environment variables.";
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+    return "DATABASE_URL must use the postgres:// or postgresql:// protocol.";
   }
   return null;
 }
@@ -625,410 +487,210 @@ function assertDatabaseConfigured() {
     throw new AppError(503, configError);
   }
 }
+function resolveSslConfig(connectionString) {
+  if (!connectionString) return void 0;
+  let parsed;
+  try {
+    parsed = new URL(connectionString);
+  } catch {
+    return { rejectUnauthorized: true };
+  }
+  const sslMode = parsed.searchParams.get("sslmode")?.trim().toLowerCase();
+  const hostname = parsed.hostname.toLowerCase();
+  const isLocalHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  if (sslMode === "disable" || isLocalHost && !sslMode) {
+    return void 0;
+  }
+  if (sslMode === "no-verify") {
+    return { rejectUnauthorized: false };
+  }
+  return { rejectUnauthorized: true };
+}
 var createPool = () => {
-  if (!global._postgresPool) {
-    const connectionString = getConnectionString();
-    const sqlHost = process.env.SQL_HOST?.trim();
-    const isRemoteTcpHost = Boolean(
-      sqlHost && !sqlHost.startsWith("/") && sqlHost !== "localhost" && sqlHost !== "127.0.0.1"
-    );
-    const shouldUseSsl = process.env.SQL_SSL === "true" || process.env.SQL_SSL !== "false" && (isRemoteTcpHost || Boolean(
-      connectionString && !connectionString.includes("localhost") && !connectionString.includes("127.0.0.1")
-    ));
-    global._postgresPool = new Pool({
-      ...connectionString ? { connectionString } : {
-        host: sqlHost,
-        port: process.env.SQL_PORT ? Number(process.env.SQL_PORT) : void 0,
-        user: process.env.SQL_USER?.trim(),
-        password: process.env.SQL_PASSWORD,
-        database: process.env.SQL_DB_NAME?.trim()
-      },
-      ssl: shouldUseSsl ? { rejectUnauthorized: false } : void 0,
-      max: process.env.VERCEL ? 3 : 10,
-      connectionTimeoutMillis: 5e3
+  const connectionString = getDatabaseUrl();
+  if (!global._postgresPool || global._postgresPoolUrl !== connectionString) {
+    const pool2 = new Pool({
+      connectionString: connectionString ?? "postgresql://unconfigured:unconfigured@127.0.0.1:5432/unconfigured",
+      ssl: resolveSslConfig(connectionString),
+      max: process.env.VERCEL ? 5 : 10,
+      idleTimeoutMillis: 2e4,
+      connectionTimeoutMillis: 15e3
     });
-    global._postgresPool.on("error", (err) => {
-      console.error("Unexpected error on idle SQL pool client:", err);
+    pool2.on("error", (err) => {
+      console.error("Unexpected error on idle PostgreSQL pool client:", err);
     });
+    global._postgresPool = pool2;
+    global._postgresPoolUrl = connectionString;
   }
   return global._postgresPool;
 };
 var pool = createPool();
 var db = drizzle(pool, { schema: schema_exports });
 
-// src/server/services/email.ts
-import nodemailer from "nodemailer";
-var DEFAULT_DEV_SENDER = "onboarding@resend.dev";
-function resolveSenderAddress() {
-  const configured = process.env.EMAIL_FROM?.trim();
-  if (configured && configured.includes("@")) {
-    return configured;
-  }
-  return DEFAULT_DEV_SENDER;
+// firebase-applet-config.json
+var firebase_applet_config_default = {
+  projectId: "spatial-campaign-nlvvl",
+  appId: "1:585554483367:web:9f176af4b70a7410b1a382",
+  apiKey: "AIzaSyALoDE5th1p03l9RBimh-rX-TTmm0SLhVs",
+  authDomain: "spatial-campaign-nlvvl.firebaseapp.com",
+  firestoreDatabaseId: "ai-studio-4e7b9940-78ae-415f-b5d7-c78ccb48710d",
+  storageBucket: "spatial-campaign-nlvvl.firebasestorage.app",
+  messagingSenderId: "585554483367",
+  measurementId: "",
+  oAuthClientId: "585554483367-mjnf856ig9lcpkki3avttcbcf0ni7f7d.apps.googleusercontent.com",
+  recaptchaSiteKey: ""
+};
+
+// src/lib/firebase-admin.ts
+import { cert, getApp, getApps, initializeApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
+function resolveProjectId() {
+  return process.env.FIREBASE_PROJECT_ID?.trim() || process.env.VITE_FIREBASE_PROJECT_ID?.trim() || firebase_applet_config_default.projectId?.trim() || void 0;
 }
-function getSmtpConfig() {
-  const host = process.env.SMTP_HOST?.trim();
-  const portRaw = process.env.SMTP_PORT?.trim();
-  const port = portRaw ? Number(portRaw) : 587;
-  const user = process.env.SMTP_USER?.trim() || (host === "smtp.resend.com" ? "resend" : void 0);
-  const pass = process.env.SMTP_PASS?.trim() || (host === "smtp.resend.com" ? process.env.RESEND_API_KEY?.trim() : void 0);
-  const from = resolveSenderAddress();
-  if (host && user && pass && Number.isFinite(port)) {
-    return {
-      host,
-      port,
-      secure: port === 465,
-      user,
-      pass,
-      from
-    };
+function resolveServiceAccountCredential() {
+  const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.trim();
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson);
+      const privateKey2 = (parsed.private_key ?? parsed.privateKey)?.replace(/\\n/g, "\n");
+      const clientEmail2 = parsed.client_email ?? parsed.clientEmail;
+      const projectId3 = parsed.project_id ?? parsed.projectId ?? resolveProjectId();
+      if (projectId3 && clientEmail2 && privateKey2) {
+        return { projectId: projectId3, clientEmail: clientEmail2, privateKey: privateKey2 };
+      }
+    } catch (error) {
+      console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT_KEY JSON:", error);
+    }
+  }
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL?.trim();
+  const privateKey = process.env.FIREBASE_PRIVATE_KEY?.trim().replace(/\\n/g, "\n");
+  const projectId2 = resolveProjectId();
+  if (projectId2 && clientEmail && privateKey) {
+    return { projectId: projectId2, clientEmail, privateKey };
   }
   return null;
 }
-function getResendConfig() {
-  const apiKey = process.env.RESEND_API_KEY?.trim();
-  const from = resolveSenderAddress();
-  if (apiKey) {
-    return { apiKey, from };
-  }
-  return null;
+function isFirebaseAdminConfigured() {
+  return Boolean(resolveProjectId());
 }
-function isEmailProviderConfigured() {
-  return Boolean(getSmtpConfig() || getResendConfig());
-}
-function getMissingEmailConfigMessage() {
-  return "Email delivery is not configured on this server. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, and EMAIL_FROM (or RESEND_API_KEY and EMAIL_FROM) in environment variables.";
-}
-function formatProviderError(error, contextLabel) {
-  const errObj = error;
-  const code = errObj?.code || (errObj?.responseCode ? String(errObj.responseCode) : void 0);
-  const rawDetails = (errObj?.response || errObj?.message || "").trim();
-  const lower = rawDetails.toLowerCase();
-  if (errObj?.responseCode === 535 || errObj?.code === "EAUTH" || lower.includes("invalid login") || lower.includes("authentication failed") || lower.includes("api key is invalid")) {
-    return {
-      status: 424,
-      code,
-      message: `${contextLabel} authentication failed: ${rawDetails || "Invalid SMTP or Resend credentials."}`
-    };
+var projectId = resolveProjectId();
+var serviceAccount = resolveServiceAccountCredential();
+var adminApp = getApps().length ? getApp() : initializeApp(
+  serviceAccount ? {
+    credential: cert(serviceAccount),
+    projectId: serviceAccount.projectId ?? projectId
+  } : {
+    projectId
   }
-  if (lower.includes("only send testing emails") || lower.includes("verify a domain") || lower.includes("validation_error") || errObj?.responseCode === 450 || errObj?.responseCode === 550) {
-    return {
-      status: 422,
-      code,
-      message: `${contextLabel} rejected the recipient due to Resend sandbox/domain restrictions (${rawDetails}). With ${DEFAULT_DEV_SENDER}, Resend only delivers to your verified Resend account email address until a custom domain is verified.`
-    };
-  }
-  if (errObj?.code === "ECONNREFUSED" || errObj?.code === "ETIMEDOUT" || errObj?.code === "ENOTFOUND" || errObj?.code === "ESOCKET") {
-    return {
-      status: 424,
-      code,
-      message: `${contextLabel} connection failed (${errObj.code}): ${rawDetails || "Unable to reach mail server."}`
-    };
-  }
-  return {
-    status: 424,
-    code,
-    message: rawDetails ? `${contextLabel} failed: ${rawDetails}` : `${contextLabel} failed unexpectedly.`
-  };
-}
-async function verifySmtpConnection() {
-  const envVarsPresent = {
-    SMTP_HOST: Boolean(process.env.SMTP_HOST?.trim()),
-    SMTP_PORT: Boolean(process.env.SMTP_PORT?.trim()),
-    SMTP_USER: Boolean(process.env.SMTP_USER?.trim()),
-    SMTP_PASS: Boolean(process.env.SMTP_PASS?.trim()),
-    EMAIL_FROM: Boolean(process.env.EMAIL_FROM?.trim()),
-    RESEND_API_KEY: Boolean(process.env.RESEND_API_KEY?.trim())
-  };
-  const smtp = getSmtpConfig();
-  if (smtp) {
-    const transporter = nodemailer.createTransport({
-      host: smtp.host,
-      port: smtp.port,
-      secure: smtp.secure,
-      connectionTimeout: 1e4,
-      greetingTimeout: 1e4,
-      auth: {
-        user: smtp.user,
-        pass: smtp.pass
-      }
-    });
-    try {
-      await transporter.verify();
-      return {
-        envVarsPresent,
-        transport: "smtp",
-        host: smtp.host,
-        port: smtp.port,
-        secure: smtp.secure,
-        from: smtp.from,
-        verified: true,
-        message: `SMTP connection and authentication succeeded (${smtp.host}:${smtp.port}, sender: ${smtp.from}).`
-      };
-    } catch (error) {
-      const formatted = formatProviderError(error, "SMTP verification");
-      return {
-        envVarsPresent,
-        transport: "smtp",
-        host: smtp.host,
-        port: smtp.port,
-        secure: smtp.secure,
-        from: smtp.from,
-        verified: false,
-        message: formatted.message,
-        errorCode: formatted.code
-      };
-    }
-  }
-  const resend = getResendConfig();
-  if (resend) {
-    try {
-      const response = await fetch("https://api.resend.com/domains", {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${resend.apiKey}`
-        }
-      });
-      if (!response.ok) {
-        const errText = await response.text();
-        return {
-          envVarsPresent,
-          transport: "resend_api",
-          host: "api.resend.com",
-          port: 443,
-          secure: true,
-          from: resend.from,
-          verified: false,
-          message: `SMTP variables are not set; Resend API check failed (${response.status}): ${errText}`,
-          errorCode: String(response.status)
-        };
-      }
-      return {
-        envVarsPresent,
-        transport: "resend_api",
-        host: "api.resend.com",
-        port: 443,
-        secure: true,
-        from: resend.from,
-        verified: true,
-        message: `SMTP variables are not set; Resend HTTP API credentials verified (sender: ${resend.from}).`
-      };
-    } catch (error) {
-      const formatted = formatProviderError(error, "Resend API verification");
-      return {
-        envVarsPresent,
-        transport: "resend_api",
-        host: "api.resend.com",
-        port: 443,
-        secure: true,
-        from: resend.from,
-        verified: false,
-        message: formatted.message,
-        errorCode: formatted.code
-      };
-    }
-  }
-  return {
-    envVarsPresent,
-    transport: "none",
-    host: null,
-    port: null,
-    secure: null,
-    from: null,
-    verified: false,
-    message: getMissingEmailConfigMessage()
-  };
-}
-function mapResendEventToStatus(lastEvent) {
-  const normalized = (lastEvent || "").trim().toLowerCase();
-  if (normalized === "delivered") return "DELIVERED";
-  if (normalized === "bounced" || normalized === "complained") return "BOUNCED";
-  if (normalized === "failed" || normalized === "canceled") return "FAILED";
-  return "SENT";
-}
-async function getResendEmailStatus(emailId) {
-  const resend = getResendConfig();
-  if (!resend) {
-    throw new AppError(424, getMissingEmailConfigMessage());
-  }
-  try {
-    const response = await fetch(`https://api.resend.com/emails/${encodeURIComponent(emailId)}`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${resend.apiKey}`
-      }
-    });
-    const rawBody = await response.text();
-    if (!response.ok) {
-      let providerMsg = rawBody;
-      try {
-        const parsed = JSON.parse(rawBody);
-        if (parsed.message) providerMsg = parsed.message;
-      } catch {
-      }
-      const formatted = formatProviderError(
-        { responseCode: response.status, message: providerMsg },
-        "Resend email status check"
-      );
-      throw new AppError(formatted.status, formatted.message);
-    }
-    const data = JSON.parse(rawBody);
-    const lastEvent = data.last_event ?? "sent";
-    const status = mapResendEventToStatus(lastEvent);
-    const messageMap = {
-      SENT: "Email accepted by Resend for delivery.",
-      DELIVERED: "Recipient mail server confirmed delivery.",
-      BOUNCED: "Recipient mail server bounced or rejected the email.",
-      FAILED: "Email delivery failed."
-    };
-    return {
-      status,
-      emailId: data.id || emailId,
-      provider: "resend",
-      lastEvent,
-      message: messageMap[status]
-    };
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    const formatted = formatProviderError(error, "Resend email status check");
-    throw new AppError(formatted.status, formatted.message, { cause: error });
-  }
-}
-async function sendViaResendApi(resend, input) {
-  const response = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${resend.apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      from: resend.from,
-      to: [input.to],
-      subject: input.subject,
-      text: input.text,
-      html: input.html
-    })
-  });
-  const rawBody = await response.text();
-  if (!response.ok) {
-    let providerMsg = rawBody;
-    try {
-      const parsed = JSON.parse(rawBody);
-      if (parsed.message) providerMsg = parsed.message;
-    } catch {
-    }
-    const formatted = formatProviderError(
-      { responseCode: response.status, message: providerMsg },
-      "Resend email delivery"
-    );
-    console.error("Resend API error:", response.status, providerMsg);
-    throw new AppError(formatted.status, formatted.message);
-  }
-  let emailId = null;
-  try {
-    const parsed = JSON.parse(rawBody);
-    if (parsed.id) emailId = parsed.id;
-  } catch {
-  }
-  if (!emailId) {
-    console.error("Resend API returned 200 without an email ID:", rawBody);
-    throw new AppError(424, "Resend did not return an email confirmation ID.");
-  }
-  try {
-    return await getResendEmailStatus(emailId);
-  } catch {
-    return {
-      status: "SENT",
-      emailId,
-      provider: "resend",
-      lastEvent: "sent",
-      message: "Email accepted by Resend for delivery."
-    };
-  }
-}
-async function sendEmail(input) {
-  const resend = getResendConfig();
-  const smtp = getSmtpConfig();
-  if (resend && (input.preferResendApi || !smtp || smtp.host === "smtp.resend.com")) {
-    try {
-      return await sendViaResendApi(resend, input);
-    } catch (error) {
-      if (error instanceof AppError) throw error;
-      const formatted = formatProviderError(error, "Resend email delivery");
-      console.error("Resend email delivery failed:", formatted.message);
-      throw new AppError(formatted.status, formatted.message, {
-        cause: error
-      });
-    }
-  }
-  if (smtp) {
-    try {
-      const transporter = nodemailer.createTransport({
-        host: smtp.host,
-        port: smtp.port,
-        secure: smtp.secure,
-        connectionTimeout: 1e4,
-        greetingTimeout: 1e4,
-        auth: {
-          user: smtp.user,
-          pass: smtp.pass
-        }
-      });
-      const info = await transporter.sendMail({
-        from: smtp.from,
-        to: input.to,
-        subject: input.subject,
-        text: input.text,
-        html: input.html
-      });
-      return {
-        status: "SENT",
-        emailId: info.messageId || null,
-        provider: "smtp",
-        lastEvent: "sent",
-        message: "Email accepted by SMTP server for delivery."
-      };
-    } catch (error) {
-      const formatted = formatProviderError(error, "SMTP email delivery");
-      console.error("SMTP email delivery failed:", formatted.message);
-      throw new AppError(formatted.status, formatted.message, {
-        cause: error
-      });
-    }
-  }
-  throw new AppError(424, getMissingEmailConfigMessage());
-}
-async function sendVerificationEmail(to, name, verifyUrl) {
-  return sendEmail({
-    to,
-    subject: "Verify your DevTrack email address",
-    text: `Hello ${name},
+);
+var adminAuth = getAuth(adminApp);
 
-Verify your email address for DevTrack by visiting:
-${verifyUrl}
+// src/lib/validations.ts
+import { z } from "zod";
+var PROJECT_STATUSES = [
+  "PLANNING",
+  "ACTIVE",
+  "ON_HOLD",
+  "COMPLETED",
+  "ARCHIVED"
+];
+var TASK_STATUSES = ["TODO", "IN_PROGRESS", "COMPLETED"];
+var TASK_PRIORITIES = ["LOW", "MEDIUM", "HIGH", "URGENT"];
+var createProjectSchema = z.object({
+  name: z.string().trim().min(2, "Project name must be at least 2 characters").max(120),
+  description: z.string().trim().max(2e3).optional().default(""),
+  status: z.enum(PROJECT_STATUSES).optional().default("PLANNING"),
+  startDate: z.string().nullable().optional(),
+  deadline: z.string().nullable().optional()
+});
+var updateProjectSchema = z.object({
+  name: z.string().trim().min(2, "Project name must be at least 2 characters").max(120).optional(),
+  description: z.string().trim().max(2e3).optional(),
+  status: z.enum(PROJECT_STATUSES).optional(),
+  startDate: z.string().nullable().optional(),
+  deadline: z.string().nullable().optional()
+});
+var createTaskSchema = z.object({
+  projectId: z.coerce.number().int().positive("Project is required"),
+  title: z.string().trim().min(2, "Task title must be at least 2 characters").max(200),
+  description: z.string().trim().max(4e3).optional().default(""),
+  status: z.enum(TASK_STATUSES).optional().default("TODO"),
+  priority: z.enum(TASK_PRIORITIES).optional().default("MEDIUM"),
+  dueDate: z.string().nullable().optional(),
+  assigneeId: z.coerce.number().int().positive().nullable().optional()
+});
+var updateTaskSchema = z.object({
+  title: z.string().trim().min(2, "Task title must be at least 2 characters").max(200).optional(),
+  description: z.string().trim().max(4e3).optional(),
+  status: z.enum(TASK_STATUSES).optional(),
+  priority: z.enum(TASK_PRIORITIES).optional(),
+  dueDate: z.string().nullable().optional(),
+  assigneeId: z.coerce.number().int().positive().nullable().optional(),
+  position: z.coerce.number().int().min(0).optional()
+});
+var moveTaskSchema = z.object({
+  status: z.enum(TASK_STATUSES),
+  position: z.coerce.number().int().min(0).default(0)
+});
+var commentSchema = z.object({
+  content: z.string().trim().min(1, "Comment cannot be empty").max(2e3)
+});
+var inviteMemberSchema = z.object({
+  email: z.string().trim().email("Valid email address is required").toLowerCase(),
+  role: z.enum(["ADMINISTRATOR", "MEMBER"]).default("MEMBER")
+});
+var updateMemberRoleSchema = z.object({
+  role: z.enum(["ADMINISTRATOR", "MEMBER"])
+});
+var updateUserSettingsSchema = z.object({
+  name: z.string().trim().min(2, "Display name must be at least 2 characters").max(80).optional(),
+  avatar: z.string().trim().max(500).nullable().optional(),
+  themePreference: z.enum(["dark", "light"]).optional(),
+  notifyOnAssign: z.boolean().optional(),
+  notifyOnComment: z.boolean().optional(),
+  notifyOnInvite: z.boolean().optional(),
+  notifyOnDeadline: z.boolean().optional()
+});
+var acceptInvitationSchema = z.object({
+  token: z.string().trim().min(8, "Invitation token is required")
+});
+var strongPasswordSchema = z.string().min(8, "Password must be at least 8 characters").max(128, "Password must be at most 128 characters").regex(/[A-Z]/, "Password must include at least one uppercase letter").regex(/[a-z]/, "Password must include at least one lowercase letter").regex(/[0-9]/, "Password must include at least one number");
+var registerSchema = z.object({
+  name: z.string().trim().min(2, "Full name must be at least 2 characters").max(80),
+  email: z.string().trim().email("Valid email address is required").toLowerCase(),
+  password: strongPasswordSchema,
+  confirmPassword: z.string().min(1, "Please confirm your password")
+}).refine((data) => data.password === data.confirmPassword, {
+  message: "Passwords do not match",
+  path: ["confirmPassword"]
+});
+var loginSchema = z.object({
+  email: z.string().trim().email("Valid email address is required").toLowerCase(),
+  password: z.string().min(1, "Password is required")
+});
+var forgotPasswordSchema = z.object({
+  email: z.string().trim().email("Valid email address is required").toLowerCase()
+});
+var resetPasswordSchema = z.object({
+  oobCode: z.string().trim().min(6, "Reset code is invalid"),
+  password: strongPasswordSchema,
+  confirmPassword: z.string().min(1, "Please confirm your password")
+}).refine((data) => data.password === data.confirmPassword, {
+  message: "Passwords do not match",
+  path: ["confirmPassword"]
+});
+var changePasswordSchema = z.object({
+  currentPassword: z.string().optional().default(""),
+  newPassword: strongPasswordSchema,
+  confirmPassword: z.string().min(1, "Please confirm your new password")
+}).refine((data) => data.newPassword === data.confirmPassword, {
+  message: "Passwords do not match",
+  path: ["confirmPassword"]
+});
 
-This link expires in 24 hours.
-`,
-    html: `<p>Hello ${escapeHtml(name)},</p><p>Please verify your email address for DevTrack by clicking the link below:</p><p><a href="${verifyUrl}">Verify Email Address</a></p><p>This link expires in 24 hours. If you did not create a DevTrack account, you can ignore this email.</p>`
-  });
-}
-async function sendPasswordResetEmail(to, name, resetUrl) {
-  return sendEmail({
-    to,
-    subject: "Reset your DevTrack password",
-    text: `Hello ${name},
-
-Reset your DevTrack password by visiting:
-${resetUrl}
-
-This link expires in 1 hour and can only be used once.
-`,
-    html: `<p>Hello ${escapeHtml(name)},</p><p>We received a request to reset your DevTrack password. Click the link below to set a new password:</p><p><a href="${resetUrl}">Reset Password</a></p><p>This link expires in 1 hour and can only be used once. If you did not request this, you can safely ignore this email.</p>`
-  });
-}
-function escapeHtml(value) {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
+// src/server/services/auth.ts
+import crypto2 from "crypto";
+import { and as and5, eq as eq6, gt as gt2 } from "drizzle-orm";
 
 // src/server/services/team.ts
 import crypto from "crypto";
@@ -1043,18 +705,18 @@ function canRemoveTargetMember(actorRole, targetRole, isSelf) {
   if (actorRole === "ADMINISTRATOR") return targetRole === "MEMBER";
   return false;
 }
-async function getUserProjectRole(projectId, userId) {
+async function getUserProjectRole(projectId2, userId) {
   try {
     const [membership] = await db.select({ role: projectMembers.role }).from(projectMembers).where(
       and(
-        eq(projectMembers.projectId, projectId),
+        eq(projectMembers.projectId, projectId2),
         eq(projectMembers.userId, userId)
       )
     ).limit(1);
     if (membership) {
       return membership.role;
     }
-    const [project] = await db.select({ ownerId: projects.ownerId }).from(projects).where(eq(projects.id, projectId)).limit(1);
+    const [project] = await db.select({ ownerId: projects.ownerId }).from(projects).where(eq(projects.id, projectId2)).limit(1);
     if (project && project.ownerId === userId) {
       return "OWNER";
     }
@@ -1064,12 +726,12 @@ async function getUserProjectRole(projectId, userId) {
     throw new AppError(500, "Failed to verify project permissions.", { cause: error });
   }
 }
-async function requireProjectAccess(projectId, userId, allowedRoles = ["OWNER", "ADMINISTRATOR", "MEMBER"]) {
-  const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, projectId)).limit(1);
+async function requireProjectAccess(projectId2, userId, allowedRoles = ["OWNER", "ADMINISTRATOR", "MEMBER"]) {
+  const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, projectId2)).limit(1);
   if (!project) {
     throw new AppError(404, "Project not found.");
   }
-  const role = await getUserProjectRole(projectId, userId);
+  const role = await getUserProjectRole(projectId2, userId);
   if (!role || !allowedRoles.includes(role)) {
     throw new AppError(403, "You do not have permission to perform this action on this project.");
   }
@@ -1362,9 +1024,9 @@ async function listWorkspaceTeam(userId) {
     throw new AppError(500, "Failed to load team directory.", { cause: error });
   }
 }
-async function listProjectInvitations(projectId, userId) {
+async function listProjectInvitations(projectId2, userId) {
   try {
-    await requireProjectAccess(projectId, userId, ["OWNER", "ADMINISTRATOR"]);
+    await requireProjectAccess(projectId2, userId, ["OWNER", "ADMINISTRATOR"]);
     return await db.select({
       id: invitations.id,
       projectId: invitations.projectId,
@@ -1375,7 +1037,7 @@ async function listProjectInvitations(projectId, userId) {
       expiresAt: invitations.expiresAt,
       createdAt: invitations.createdAt,
       invitedByName: users.name
-    }).from(invitations).innerJoin(users, eq4(invitations.invitedById, users.id)).where(eq4(invitations.projectId, projectId)).orderBy(desc3(invitations.createdAt));
+    }).from(invitations).innerJoin(users, eq4(invitations.invitedById, users.id)).where(eq4(invitations.projectId, projectId2)).orderBy(desc3(invitations.createdAt));
   } catch (error) {
     if (error instanceof AppError) throw error;
     console.error("Failed to list project invitations:", error);
@@ -1408,9 +1070,9 @@ async function listIncomingInvitations(userEmail) {
     throw new AppError(500, "Failed to load your invitations.", { cause: error });
   }
 }
-async function inviteMember(projectId, actorUserId, input) {
+async function inviteMember(projectId2, actorUserId, input) {
   try {
-    const actorRole = await requireProjectAccess(projectId, actorUserId, [
+    const actorRole = await requireProjectAccess(projectId2, actorUserId, [
       "OWNER",
       "ADMINISTRATOR"
     ]);
@@ -1426,7 +1088,7 @@ async function inviteMember(projectId, actorUserId, input) {
     if (existingUser) {
       const [alreadyMember] = await db.select({ id: projectMembers.id }).from(projectMembers).where(
         and4(
-          eq4(projectMembers.projectId, projectId),
+          eq4(projectMembers.projectId, projectId2),
           eq4(projectMembers.userId, existingUser.id)
         )
       ).limit(1);
@@ -1436,7 +1098,7 @@ async function inviteMember(projectId, actorUserId, input) {
     }
     const [existingPending] = await db.select({ id: invitations.id }).from(invitations).where(
       and4(
-        eq4(invitations.projectId, projectId),
+        eq4(invitations.projectId, projectId2),
         eq4(invitations.email, cleanEmail),
         eq4(invitations.status, "PENDING"),
         gt(invitations.expiresAt, /* @__PURE__ */ new Date())
@@ -1445,13 +1107,13 @@ async function inviteMember(projectId, actorUserId, input) {
     if (existingPending) {
       throw new AppError(409, "A pending invitation already exists for this email.");
     }
-    const [project] = await db.select({ name: projects.name }).from(projects).where(eq4(projects.id, projectId)).limit(1);
+    const [project] = await db.select({ name: projects.name }).from(projects).where(eq4(projects.id, projectId2)).limit(1);
     const projectName = project?.name ?? "DevTrack Project";
     const token = crypto.randomBytes(24).toString("hex");
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1e3);
     return await db.transaction(async (tx) => {
       const [created] = await tx.insert(invitations).values({
-        projectId,
+        projectId: projectId2,
         email: cleanEmail,
         role: input.role,
         token,
@@ -1461,7 +1123,7 @@ async function inviteMember(projectId, actorUserId, input) {
       }).returning();
       await logActivity(tx, {
         actorId: actorUserId,
-        projectId,
+        projectId: projectId2,
         action: "MEMBER_INVITED",
         resourceType: "INVITATION",
         resourceName: cleanEmail,
@@ -1628,12 +1290,12 @@ async function revokeInvitation(invitationId, userId) {
     throw new AppError(500, "Failed to revoke invitation.", { cause: error });
   }
 }
-async function updateMemberRole(projectId, targetUserId, actorUserId, newRole) {
+async function updateMemberRole(projectId2, targetUserId, actorUserId, newRole) {
   try {
-    await requireProjectAccess(projectId, actorUserId, ["OWNER"]);
+    await requireProjectAccess(projectId2, actorUserId, ["OWNER"]);
     const [target] = await db.select().from(projectMembers).where(
       and4(
-        eq4(projectMembers.projectId, projectId),
+        eq4(projectMembers.projectId, projectId2),
         eq4(projectMembers.userId, targetUserId)
       )
     ).limit(1);
@@ -1646,7 +1308,7 @@ async function updateMemberRole(projectId, targetUserId, actorUserId, newRole) {
       const [targetUser] = await tx.select({ name: users.name, email: users.email }).from(users).where(eq4(users.id, targetUserId)).limit(1);
       await logActivity(tx, {
         actorId: actorUserId,
-        projectId,
+        projectId: projectId2,
         action: "MEMBER_ROLE_UPDATED",
         resourceType: "MEMBER",
         resourceName: targetUser?.name ?? targetUser?.email ?? "Member",
@@ -1660,12 +1322,12 @@ async function updateMemberRole(projectId, targetUserId, actorUserId, newRole) {
     throw new AppError(500, "Failed to update member role.", { cause: error });
   }
 }
-async function removeMember(projectId, targetUserId, actorUserId) {
+async function removeMember(projectId2, targetUserId, actorUserId) {
   try {
-    const actorRole = await requireProjectAccess(projectId, actorUserId);
+    const actorRole = await requireProjectAccess(projectId2, actorUserId);
     const [target] = await db.select().from(projectMembers).where(
       and4(
-        eq4(projectMembers.projectId, projectId),
+        eq4(projectMembers.projectId, projectId2),
         eq4(projectMembers.userId, targetUserId)
       )
     ).limit(1);
@@ -1681,10 +1343,10 @@ async function removeMember(projectId, targetUserId, actorUserId) {
     return await db.transaction(async (tx) => {
       const [targetUser] = await tx.select({ name: users.name, email: users.email }).from(users).where(eq4(users.id, targetUserId)).limit(1);
       await tx.delete(projectMembers).where(eq4(projectMembers.id, target.id));
-      await tx.update(tasks).set({ assigneeId: null, updatedAt: /* @__PURE__ */ new Date() }).where(and4(eq4(tasks.projectId, projectId), eq4(tasks.assigneeId, targetUserId)));
+      await tx.update(tasks).set({ assigneeId: null, updatedAt: /* @__PURE__ */ new Date() }).where(and4(eq4(tasks.projectId, projectId2), eq4(tasks.assigneeId, targetUserId)));
       await logActivity(tx, {
         actorId: actorUserId,
-        projectId,
+        projectId: projectId2,
         action: "MEMBER_REMOVED",
         resourceType: "MEMBER",
         resourceName: targetUser?.name ?? targetUser?.email ?? "Member",
@@ -1720,67 +1382,114 @@ function sanitizeUser(row) {
     updatedAt: row.updatedAt
   };
 }
-async function getOrCreateUser(uid, email, name, avatar, markEmailVerified = false) {
+async function ensureOAuthAccountLink(executor, userId, provider, providerAccountId) {
+  await executor.insert(oauthAccounts).values({
+    userId,
+    provider,
+    providerAccountId
+  }).onConflictDoNothing();
+}
+async function syncFirebaseUserWithExecutor(executor, input) {
+  const cleanEmail = (input.email?.trim() || `${input.uid}@users.devtrack.app`).toLowerCase();
+  const hasRealEmail = Boolean(input.email && input.email.trim());
+  const isVerified = Boolean(input.emailVerified);
+  const provider = (input.provider?.trim() || "firebase").toLowerCase();
+  const displayName = input.name?.trim() || cleanEmail.split("@")[0] || "Developer";
+  const byUid = await executor.select().from(users).where(eq5(users.uid, input.uid)).limit(1);
+  if (byUid.length > 0) {
+    const existing = byUid[0];
+    const updates = {};
+    if (hasRealEmail && existing.email !== cleanEmail) {
+      updates.email = cleanEmail;
+    }
+    if (isVerified && !existing.emailVerifiedAt) {
+      updates.emailVerifiedAt = /* @__PURE__ */ new Date();
+    }
+    if (!existing.avatar && input.avatar) {
+      updates.avatar = input.avatar;
+    }
+    if (input.name?.trim() && (!existing.name || existing.name === cleanEmail.split("@")[0])) {
+      updates.name = input.name.trim();
+    }
+    let finalRow = existing;
+    if (Object.keys(updates).length > 0) {
+      updates.updatedAt = /* @__PURE__ */ new Date();
+      const updated = await executor.update(users).set(updates).where(eq5(users.id, existing.id)).returning();
+      finalRow = updated[0];
+    }
+    await ensureOAuthAccountLink(executor, finalRow.id, provider, input.uid);
+    return { user: sanitizeUser(finalRow), isNewUser: false };
+  }
+  const linkedByOAuth = await executor.select({ user: users }).from(oauthAccounts).innerJoin(users, eq5(oauthAccounts.userId, users.id)).where(eq5(oauthAccounts.providerAccountId, input.uid)).limit(1);
+  if (linkedByOAuth.length > 0) {
+    const existing = linkedByOAuth[0].user;
+    const updates = {};
+    if (isVerified && !existing.emailVerifiedAt) {
+      updates.emailVerifiedAt = /* @__PURE__ */ new Date();
+    }
+    if (!existing.avatar && input.avatar) {
+      updates.avatar = input.avatar;
+    }
+    let finalRow = existing;
+    if (Object.keys(updates).length > 0) {
+      updates.updatedAt = /* @__PURE__ */ new Date();
+      const updated = await executor.update(users).set(updates).where(eq5(users.id, existing.id)).returning();
+      finalRow = updated[0];
+    }
+    await ensureOAuthAccountLink(executor, finalRow.id, provider, input.uid);
+    return { user: sanitizeUser(finalRow), isNewUser: false };
+  }
+  if (hasRealEmail) {
+    const byEmail = await executor.select().from(users).where(eq5(users.email, cleanEmail)).limit(1);
+    if (byEmail.length > 0) {
+      const existing = byEmail[0];
+      if (!isVerified) {
+        throw new AppError(
+          409,
+          "An account with this email address already exists. Sign in with your original method or verify your email before linking."
+        );
+      }
+      const updated = await executor.update(users).set({
+        avatar: existing.avatar ?? input.avatar ?? null,
+        emailVerifiedAt: existing.emailVerifiedAt ?? /* @__PURE__ */ new Date(),
+        updatedAt: /* @__PURE__ */ new Date()
+      }).where(eq5(users.id, existing.id)).returning();
+      await ensureOAuthAccountLink(executor, updated[0].id, provider, input.uid);
+      return { user: sanitizeUser(updated[0]), isNewUser: false };
+    }
+  }
+  const inserted = await executor.insert(users).values({
+    uid: input.uid,
+    email: cleanEmail,
+    name: displayName,
+    avatar: input.avatar ?? null,
+    emailVerifiedAt: isVerified ? /* @__PURE__ */ new Date() : null
+  }).returning();
+  await ensureOAuthAccountLink(executor, inserted[0].id, provider, input.uid);
+  return { user: sanitizeUser(inserted[0]), isNewUser: true };
+}
+async function syncFirebaseUser(input) {
   try {
     assertDatabaseConfigured();
-    const cleanEmail = email.trim().toLowerCase();
-    const displayName = name?.trim() || cleanEmail.split("@")[0] || "Developer";
-    const byUid = await db.select().from(users).where(eq5(users.uid, uid)).limit(1);
-    if (byUid.length > 0) {
-      const updates = {};
-      if (byUid[0].email !== cleanEmail) updates.email = cleanEmail;
-      if (markEmailVerified && !byUid[0].emailVerifiedAt) {
-        updates.emailVerifiedAt = /* @__PURE__ */ new Date();
-      }
-      if (Object.keys(updates).length > 0) {
-        updates.updatedAt = /* @__PURE__ */ new Date();
-        const updated = await db.update(users).set(updates).where(eq5(users.uid, uid)).returning();
-        return sanitizeUser(updated[0]);
-      }
-      return sanitizeUser(byUid[0]);
-    }
-    const byEmail = await db.select().from(users).where(eq5(users.email, cleanEmail)).limit(1);
-    if (byEmail.length > 0) {
-      const updated = await db.update(users).set({
-        uid,
-        avatar: byEmail[0].avatar ?? avatar ?? null,
-        emailVerifiedAt: byEmail[0].emailVerifiedAt ?? (markEmailVerified ? /* @__PURE__ */ new Date() : null),
-        updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq5(users.id, byEmail[0].id)).returning();
-      return sanitizeUser(updated[0]);
-    }
-    const inserted = await db.insert(users).values({
-      uid,
-      email: cleanEmail,
-      name: displayName,
-      avatar: avatar ?? null,
-      emailVerifiedAt: markEmailVerified ? /* @__PURE__ */ new Date() : null
-    }).onConflictDoNothing().returning();
-    if (inserted.length > 0) {
-      return sanitizeUser(inserted[0]);
-    }
-    const retryByUid = await db.select().from(users).where(eq5(users.uid, uid)).limit(1);
-    if (retryByUid.length > 0) return sanitizeUser(retryByUid[0]);
-    const retryByEmail = await db.select().from(users).where(eq5(users.email, cleanEmail)).limit(1);
-    if (retryByEmail.length > 0) {
-      const updated = await db.update(users).set({
-        uid,
-        emailVerifiedAt: retryByEmail[0].emailVerifiedAt ?? (markEmailVerified ? /* @__PURE__ */ new Date() : null),
-        updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq5(users.id, retryByEmail[0].id)).returning();
-      return sanitizeUser(updated[0]);
-    }
-    throw new AppError(500, "Failed to synchronize user profile.");
+    return await db.transaction(async (tx) => syncFirebaseUserWithExecutor(tx, input));
   } catch (error) {
     if (error instanceof AppError) throw error;
     const mapped = mapDatabaseError(error);
+    if (mapped?.statusCode === 409) {
+      try {
+        return await db.transaction(async (tx) => syncFirebaseUserWithExecutor(tx, input));
+      } catch (retryError) {
+        if (retryError instanceof AppError) throw retryError;
+      }
+    }
     if (mapped) throw mapped;
-    console.error("Failed to upsert user:", error);
+    console.error("Failed to synchronize Firebase user:", error);
     throw new AppError(500, "Failed to synchronize user profile.", { cause: error });
   }
 }
 async function updateUserSettings(userId, data) {
   try {
+    assertDatabaseConfigured();
     const updatePayload = {
       updatedAt: /* @__PURE__ */ new Date()
     };
@@ -1798,12 +1507,15 @@ async function updateUserSettings(userId, data) {
     return sanitizeUser(updated);
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error("Failed to update user settings:", error);
     throw new AppError(500, "Failed to update settings.", { cause: error });
   }
 }
 async function updateUserAvatar(userId, avatarDataUri) {
   try {
+    assertDatabaseConfigured();
     const [updated] = await db.update(users).set({
       avatar: avatarDataUri,
       updatedAt: /* @__PURE__ */ new Date()
@@ -1814,31 +1526,21 @@ async function updateUserAvatar(userId, avatarDataUri) {
     return sanitizeUser(updated);
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error("Failed to update user avatar:", error);
     throw new AppError(500, "Failed to update profile picture.", { cause: error });
   }
 }
 
 // src/server/services/auth.ts
-var BCRYPT_ROUNDS = 10;
 var SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
-var RESET_TOKEN_TTL_MS = 60 * 60 * 1e3;
-var VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1e3;
 var SESSION_COOKIE_NAME = "devtrack_session";
 function hashToken(rawToken) {
   return crypto2.createHash("sha256").update(rawToken).digest("hex");
 }
 function generateSecureToken() {
   return crypto2.randomBytes(32).toString("hex");
-}
-async function hashPassword(plain) {
-  return bcrypt.hash(plain, BCRYPT_ROUNDS);
-}
-async function verifyPassword(plain, hash) {
-  return bcrypt.compare(plain, hash);
-}
-function isEmailVerificationEnforced() {
-  return false;
 }
 async function createSessionRecord(userId, userAgent, executor = db) {
   try {
@@ -1889,276 +1591,79 @@ async function deleteSessionByToken(rawToken) {
     throw new AppError(500, "Failed to sign out cleanly.", { cause: error });
   }
 }
-async function registerWithEmail(input) {
+async function syncAuthenticatedFirebaseUser(decoded, options) {
   try {
     assertDatabaseConfigured();
-    const cleanEmail = input.email.trim().toLowerCase();
-    const [existing] = await db.select({ id: users.id }).from(users).where(eq6(users.email, cleanEmail)).limit(1);
-    if (existing) {
-      throw new AppError(409, "An account with this email address already exists.");
-    }
-    const passwordHash = await hashPassword(input.password);
-    const { createdUser, sessionToken } = await db.transaction(async (tx) => {
-      const [inserted] = await tx.insert(users).values({
-        uid: `local_${crypto2.randomUUID()}`,
-        name: input.name.trim(),
-        email: cleanEmail,
-        passwordHash,
-        emailVerifiedAt: null
-      }).returning();
-      await syncPendingInvitationNotificationsForUser(tx, inserted.id);
-      const token = await createSessionRecord(inserted.id, input.userAgent, tx);
-      return { createdUser: inserted, sessionToken: token };
+    const provider = decoded.firebase?.sign_in_provider ?? "firebase";
+    const { user, isNewUser } = await syncFirebaseUser({
+      uid: decoded.uid,
+      email: decoded.email ?? null,
+      emailVerified: Boolean(decoded.email_verified),
+      name: options?.name?.trim() || decoded.name || null,
+      avatar: decoded.picture ?? null,
+      provider
     });
-    return {
-      user: sanitizeUser(createdUser),
-      requiresVerification: false,
-      emailConfigured: isEmailProviderConfigured(),
-      sessionToken,
-      message: "Account created successfully."
-    };
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    const mapped = mapDatabaseError(error, {
-      duplicateMessage: "An account with this email address already exists."
-    });
-    if (mapped) {
-      console.error("Email registration database error:", error);
-      throw mapped;
-    }
-    console.error("Email registration failed:", error);
-    throw new AppError(500, "Failed to create account.", { cause: error });
-  }
-}
-async function loginWithEmail(input) {
-  try {
-    assertDatabaseConfigured();
-    const cleanEmail = input.email.trim().toLowerCase();
-    const [user] = await db.select().from(users).where(eq6(users.email, cleanEmail)).limit(1);
-    if (!user || !user.passwordHash) {
-      throw new AppError(401, "Invalid email address or password.");
-    }
-    const matches = await verifyPassword(input.password, user.passwordHash);
-    if (!matches) {
-      throw new AppError(401, "Invalid email address or password.");
-    }
     await syncPendingInvitationNotificationsForUser(db, user.id);
-    const sessionToken = await createSessionRecord(user.id, input.userAgent);
-    return {
-      user: sanitizeUser(user),
-      sessionToken
-    };
+    const sessionToken = await createSessionRecord(user.id, options?.userAgent);
+    return { user, sessionToken, isNewUser };
   } catch (error) {
     if (error instanceof AppError) throw error;
     const mapped = mapDatabaseError(error);
     if (mapped) {
-      console.error("Email login database error:", error);
+      console.error("Firebase session sync database error:", error);
       throw mapped;
     }
-    console.error("Email login failed:", error);
-    throw new AppError(500, "Authentication failed.", { cause: error });
-  }
-}
-async function authenticateWithGoogleToken(decoded, userAgent) {
-  try {
-    assertDatabaseConfigured();
-    const email = decoded.email || `${decoded.uid}@users.devtrack.app`;
-    const isVerified = Boolean(decoded.email_verified);
-    const user = await getOrCreateUser(
-      decoded.uid,
-      email,
-      decoded.name,
-      decoded.picture ?? null,
-      isVerified
-    );
-    await db.insert(oauthAccounts).values({
-      userId: user.id,
-      provider: "google",
-      providerAccountId: decoded.uid
-    }).onConflictDoNothing();
-    await syncPendingInvitationNotificationsForUser(db, user.id);
-    const sessionToken = await createSessionRecord(user.id, userAgent);
-    return { user, sessionToken };
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    const mapped = mapDatabaseError(error);
-    if (mapped) {
-      console.error("Google OAuth database error:", error);
-      throw mapped;
-    }
-    console.error("Google OAuth session creation failed:", error);
-    throw new AppError(500, "Failed to complete Google authentication.", {
+    console.error("Firebase session synchronization failed:", error);
+    throw new AppError(500, "Failed to synchronize authentication session.", {
       cause: error
     });
-  }
-}
-async function requestPasswordReset(email, baseUrl) {
-  try {
-    if (!isEmailProviderConfigured()) {
-      return {
-        sent: false,
-        emailConfigured: false,
-        message: getMissingEmailConfigMessage()
-      };
-    }
-    const cleanEmail = email.trim().toLowerCase();
-    const [user] = await db.select().from(users).where(eq6(users.email, cleanEmail)).limit(1);
-    if (user) {
-      const rawToken = generateSecureToken();
-      const tokenHash = hashToken(rawToken);
-      const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
-      await db.transaction(async (tx) => {
-        await tx.update(passwordResetTokens).set({ usedAt: /* @__PURE__ */ new Date() }).where(
-          and5(
-            eq6(passwordResetTokens.userId, user.id),
-            isNull(passwordResetTokens.usedAt)
-          )
-        );
-        await tx.insert(passwordResetTokens).values({
-          userId: user.id,
-          tokenHash,
-          expiresAt
-        });
-      });
-      const resetUrl = `${baseUrl}/reset-password?token=${rawToken}`;
-      try {
-        await sendPasswordResetEmail(cleanEmail, user.name, resetUrl);
-      } catch (emailErr) {
-        await db.delete(passwordResetTokens).where(eq6(passwordResetTokens.tokenHash, tokenHash)).catch(() => void 0);
-        throw emailErr;
-      }
-    }
-    return {
-      sent: true,
-      emailConfigured: true,
-      message: "If an account exists with that email address, password reset instructions will be sent."
-    };
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    console.error("Password reset request failed:", error);
-    throw new AppError(500, "Failed to process password reset request.", {
-      cause: error
-    });
-  }
-}
-async function resetPasswordWithToken(rawToken, newPassword) {
-  try {
-    const tokenHash = hashToken(rawToken.trim());
-    const [record] = await db.select().from(passwordResetTokens).where(eq6(passwordResetTokens.tokenHash, tokenHash)).limit(1);
-    if (!record) {
-      throw new AppError(400, "Invalid password reset token.");
-    }
-    if (record.usedAt) {
-      throw new AppError(400, "This password reset link has already been used.");
-    }
-    if (record.expiresAt.getTime() < Date.now()) {
-      throw new AppError(400, "This password reset link has expired.");
-    }
-    const newHash = await hashPassword(newPassword);
-    await db.transaction(async (tx) => {
-      await tx.update(users).set({ passwordHash: newHash, updatedAt: /* @__PURE__ */ new Date() }).where(eq6(users.id, record.userId));
-      await tx.update(passwordResetTokens).set({ usedAt: /* @__PURE__ */ new Date() }).where(eq6(passwordResetTokens.id, record.id));
-      await tx.delete(sessions).where(eq6(sessions.userId, record.userId));
-    });
-    return { success: true };
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    console.error("Password reset failed:", error);
-    throw new AppError(500, "Failed to reset password.", { cause: error });
-  }
-}
-async function verifyEmailWithToken(rawToken) {
-  try {
-    const tokenHash = hashToken(rawToken.trim());
-    const [record] = await db.select().from(emailVerificationTokens).where(eq6(emailVerificationTokens.tokenHash, tokenHash)).limit(1);
-    if (!record) {
-      throw new AppError(400, "Invalid email verification token.");
-    }
-    if (record.usedAt) {
-      throw new AppError(400, "This verification link has already been used.");
-    }
-    if (record.expiresAt.getTime() < Date.now()) {
-      throw new AppError(400, "This verification link has expired.");
-    }
-    await db.transaction(async (tx) => {
-      await tx.update(users).set({ emailVerifiedAt: /* @__PURE__ */ new Date(), updatedAt: /* @__PURE__ */ new Date() }).where(eq6(users.id, record.userId));
-      await tx.update(emailVerificationTokens).set({ usedAt: /* @__PURE__ */ new Date() }).where(eq6(emailVerificationTokens.id, record.id));
-      await syncPendingInvitationNotificationsForUser(tx, record.userId);
-    });
-    return { success: true };
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    console.error("Email verification failed:", error);
-    throw new AppError(500, "Failed to verify email address.", { cause: error });
-  }
-}
-async function resendVerificationEmail(email, baseUrl) {
-  try {
-    if (!isEmailProviderConfigured()) {
-      return {
-        sent: false,
-        emailConfigured: false,
-        message: getMissingEmailConfigMessage()
-      };
-    }
-    const cleanEmail = email.trim().toLowerCase();
-    const [user] = await db.select().from(users).where(eq6(users.email, cleanEmail)).limit(1);
-    if (user && !user.emailVerifiedAt) {
-      const rawToken = generateSecureToken();
-      const tokenHash = hashToken(rawToken);
-      const expiresAt = new Date(Date.now() + VERIFY_TOKEN_TTL_MS);
-      await db.transaction(async (tx) => {
-        await tx.update(emailVerificationTokens).set({ usedAt: /* @__PURE__ */ new Date() }).where(
-          and5(
-            eq6(emailVerificationTokens.userId, user.id),
-            isNull(emailVerificationTokens.usedAt)
-          )
-        );
-        await tx.insert(emailVerificationTokens).values({
-          userId: user.id,
-          tokenHash,
-          expiresAt
-        });
-      });
-      const verifyUrl = `${baseUrl}/verify-email?token=${rawToken}`;
-      await sendVerificationEmail(cleanEmail, user.name, verifyUrl);
-    }
-    return {
-      sent: true,
-      emailConfigured: true,
-      message: "If an unverified account exists with that email, a new verification link has been sent."
-    };
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    console.error("Resend verification failed:", error);
-    throw new AppError(500, "Failed to resend verification email.", { cause: error });
-  }
-}
-async function changeUserPassword(userId, currentPassword, newPassword) {
-  try {
-    const [user] = await db.select().from(users).where(eq6(users.id, userId)).limit(1);
-    if (!user) throw new AppError(404, "User not found.");
-    if (user.passwordHash) {
-      if (!currentPassword) {
-        throw new AppError(400, "Current password is required.");
-      }
-      const matches = await verifyPassword(currentPassword, user.passwordHash);
-      if (!matches) {
-        throw new AppError(401, "Current password is incorrect.");
-      }
-    }
-    const newHash = await hashPassword(newPassword);
-    await db.update(users).set({ passwordHash: newHash, updatedAt: /* @__PURE__ */ new Date() }).where(eq6(users.id, userId));
-    return { success: true };
-  } catch (error) {
-    if (error instanceof AppError) throw error;
-    console.error("Change password failed:", error);
-    throw new AppError(500, "Failed to update password.", { cause: error });
   }
 }
 
 // src/server/middleware/auth.ts
 var requireAuth = async (req, res, next) => {
+  try {
+    assertDatabaseConfigured();
+  } catch (error) {
+    next(error);
+    return;
+  }
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.slice("Bearer ".length).trim();
+    if (!token) {
+      res.status(401).json({ error: "Authentication token missing." });
+      return;
+    }
+    let decoded;
+    try {
+      decoded = await adminAuth.verifyIdToken(token);
+    } catch (error) {
+      console.error("Error verifying Firebase ID token:", error);
+      res.status(401).json({ error: "Invalid or expired authentication session." });
+      return;
+    }
+    try {
+      req.firebaseUser = decoded;
+      const { user, isNewUser } = await syncFirebaseUser({
+        uid: decoded.uid,
+        email: decoded.email ?? null,
+        emailVerified: Boolean(decoded.email_verified),
+        name: decoded.name ?? null,
+        avatar: decoded.picture ?? null,
+        provider: decoded.firebase?.sign_in_provider ?? "firebase"
+      });
+      if (isNewUser) {
+        await syncPendingInvitationNotificationsForUser(db, user.id);
+      }
+      req.dbUser = user;
+      next();
+      return;
+    } catch (error) {
+      next(error);
+      return;
+    }
+  }
   const sessionCookie = req.cookies?.[SESSION_COOKIE_NAME];
   if (typeof sessionCookie === "string" && sessionCookie.trim()) {
     try {
@@ -2173,37 +1678,7 @@ var requireAuth = async (req, res, next) => {
       return;
     }
   }
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    res.status(401).json({ error: "Authentication required." });
-    return;
-  }
-  const token = authHeader.slice("Bearer ".length).trim();
-  if (!token) {
-    res.status(401).json({ error: "Authentication token missing." });
-    return;
-  }
-  let decoded;
-  try {
-    decoded = await adminAuth.verifyIdToken(token);
-  } catch (error) {
-    console.error("Error verifying Firebase ID token:", error);
-    res.status(401).json({ error: "Invalid or expired authentication session." });
-    return;
-  }
-  try {
-    req.firebaseUser = decoded;
-    req.dbUser = await getOrCreateUser(
-      decoded.uid,
-      decoded.email || `${decoded.uid}@users.devtrack.app`,
-      decoded.name,
-      decoded.picture ?? null,
-      Boolean(decoded.email_verified)
-    );
-    next();
-  } catch (error) {
-    next(error);
-  }
+  res.status(401).json({ error: "Authentication required." });
 };
 
 // src/server/services/dashboard.ts
@@ -2587,9 +2062,9 @@ async function createProject(userId, input) {
     throw new AppError(500, "Failed to create project.", { cause: error });
   }
 }
-async function getProjectDetails(projectId, userId) {
+async function getProjectDetails(projectId2, userId) {
   try {
-    const role = await requireProjectAccess(projectId, userId);
+    const role = await requireProjectAccess(projectId2, userId);
     const [project] = await db.select({
       id: projects.id,
       name: projects.name,
@@ -2603,7 +2078,7 @@ async function getProjectDetails(projectId, userId) {
       ownerName: users.name,
       ownerEmail: users.email,
       ownerAvatar: users.avatar
-    }).from(projects).innerJoin(users, eq8(projects.ownerId, users.id)).where(eq8(projects.id, projectId)).limit(1);
+    }).from(projects).innerJoin(users, eq8(projects.ownerId, users.id)).where(eq8(projects.id, projectId2)).limit(1);
     if (!project) {
       throw new AppError(404, "Project not found.");
     }
@@ -2616,8 +2091,8 @@ async function getProjectDetails(projectId, userId) {
         name: users.name,
         email: users.email,
         avatar: users.avatar
-      }).from(projectMembers).innerJoin(users, eq8(projectMembers.userId, users.id)).where(eq8(projectMembers.projectId, projectId)).orderBy(projectMembers.joinedAt),
-      db.select().from(tasks).where(eq8(tasks.projectId, projectId)).orderBy(tasks.position, desc5(tasks.createdAt)),
+      }).from(projectMembers).innerJoin(users, eq8(projectMembers.userId, users.id)).where(eq8(projectMembers.projectId, projectId2)).orderBy(projectMembers.joinedAt),
+      db.select().from(tasks).where(eq8(tasks.projectId, projectId2)).orderBy(tasks.position, desc5(tasks.createdAt)),
       db.select({
         id: activityLogs.id,
         actorId: activityLogs.actorId,
@@ -2628,7 +2103,7 @@ async function getProjectDetails(projectId, userId) {
         resourceName: activityLogs.resourceName,
         details: activityLogs.details,
         createdAt: activityLogs.createdAt
-      }).from(activityLogs).innerJoin(users, eq8(activityLogs.actorId, users.id)).where(eq8(activityLogs.projectId, projectId)).orderBy(desc5(activityLogs.createdAt)).limit(25)
+      }).from(activityLogs).innerJoin(users, eq8(activityLogs.actorId, users.id)).where(eq8(activityLogs.projectId, projectId2)).orderBy(desc5(activityLogs.createdAt)).limit(25)
     ]);
     const taskIds = taskRows.map((t) => t.id);
     const commentCounts = /* @__PURE__ */ new Map();
@@ -2707,11 +2182,11 @@ async function getProjectDetails(projectId, userId) {
     throw new AppError(500, "Failed to load project details.", { cause: error });
   }
 }
-async function updateProject(projectId, userId, input) {
+async function updateProject(projectId2, userId, input) {
   try {
-    await requireProjectAccess(projectId, userId, ["OWNER", "ADMINISTRATOR"]);
+    await requireProjectAccess(projectId2, userId, ["OWNER", "ADMINISTRATOR"]);
     return await db.transaction(async (tx) => {
-      const [existing] = await tx.select().from(projects).where(eq8(projects.id, projectId)).limit(1);
+      const [existing] = await tx.select().from(projects).where(eq8(projects.id, projectId2)).limit(1);
       if (!existing) throw new AppError(404, "Project not found.");
       const updateData = {
         updatedAt: /* @__PURE__ */ new Date()
@@ -2721,7 +2196,7 @@ async function updateProject(projectId, userId, input) {
       if (input.status !== void 0) updateData.status = input.status;
       if (input.startDate !== void 0) updateData.startDate = parseDateInput(input.startDate);
       if (input.deadline !== void 0) updateData.deadline = parseDateInput(input.deadline);
-      const [updated] = await tx.update(projects).set(updateData).where(eq8(projects.id, projectId)).returning();
+      const [updated] = await tx.update(projects).set(updateData).where(eq8(projects.id, projectId2)).returning();
       await logActivity(tx, {
         actorId: userId,
         projectId: updated.id,
@@ -2738,11 +2213,11 @@ async function updateProject(projectId, userId, input) {
     throw new AppError(500, "Failed to update project.", { cause: error });
   }
 }
-async function deleteProject(projectId, userId) {
+async function deleteProject(projectId2, userId) {
   try {
-    await requireProjectAccess(projectId, userId, ["OWNER"]);
+    await requireProjectAccess(projectId2, userId, ["OWNER"]);
     return await db.transaction(async (tx) => {
-      const [existing] = await tx.select().from(projects).where(eq8(projects.id, projectId)).limit(1);
+      const [existing] = await tx.select().from(projects).where(eq8(projects.id, projectId2)).limit(1);
       if (!existing) throw new AppError(404, "Project not found.");
       await logActivity(tx, {
         actorId: userId,
@@ -2752,8 +2227,8 @@ async function deleteProject(projectId, userId) {
         resourceName: existing.name,
         details: `Deleted project "${existing.name}"`
       });
-      await tx.delete(projects).where(eq8(projects.id, projectId));
-      return { deletedId: projectId };
+      await tx.delete(projects).where(eq8(projects.id, projectId2));
+      return { deletedId: projectId2 };
     });
   } catch (error) {
     if (error instanceof AppError) throw error;
@@ -3384,9 +2859,10 @@ function detectImageMimeType(buf) {
 var __filename = fileURLToPath(import.meta.url);
 var __dirname = path.dirname(__filename);
 function isGoogleOAuthConfigured() {
-  return Boolean(
-    firebase_applet_config_default.apiKey && firebase_applet_config_default.projectId && firebase_applet_config_default.oAuthClientId
-  );
+  const apiKey = process.env.VITE_FIREBASE_API_KEY?.trim() || firebase_applet_config_default.apiKey;
+  const authDomain = process.env.VITE_FIREBASE_AUTH_DOMAIN?.trim() || firebase_applet_config_default.authDomain;
+  const projectId2 = process.env.FIREBASE_PROJECT_ID?.trim() || process.env.VITE_FIREBASE_PROJECT_ID?.trim() || firebase_applet_config_default.projectId;
+  return Boolean(apiKey && authDomain && projectId2);
 }
 var app = express();
 app.set("trust proxy", 1);
@@ -3404,18 +2880,6 @@ function isHttpsRequest(req) {
   const rawProto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
   const proto = rawProto?.split(",")[0]?.trim().toLowerCase();
   return req.secure || proto === "https" || Boolean(process.env.VERCEL) || (process.env.APP_URL?.trim().startsWith("https://") ?? false);
-}
-function getBaseUrl(req) {
-  const configured = process.env.APP_URL?.trim().replace(/\/$/, "");
-  if (configured && configured !== "MY_APP_URL") {
-    return configured;
-  }
-  const host = req.get("host");
-  if (!host) {
-    return "http://localhost:3000";
-  }
-  const proto = isHttpsRequest(req) ? "https" : req.protocol;
-  return `${proto}://${host}`;
 }
 function setSessionCookie(res, req, rawToken) {
   const isHttps = isHttpsRequest(req);
@@ -3449,151 +2913,72 @@ function asyncHandler(fn) {
     fn(req, res, next).catch(next);
   };
 }
+function extractFirebaseToken(req) {
+  const authHeader = req.headers.authorization;
+  const bodyToken = req.body && typeof req.body === "object" && "idToken" in req.body ? req.body.idToken : void 0;
+  if (typeof bodyToken === "string" && bodyToken.trim()) {
+    return bodyToken.trim();
+  }
+  if (authHeader?.startsWith("Bearer ")) {
+    return authHeader.slice("Bearer ".length).trim();
+  }
+  return "";
+}
+var handleFirebaseSessionSync = asyncHandler(async (req, res) => {
+  if (!isFirebaseAdminConfigured()) {
+    res.status(503).json({
+      error: "Firebase Authentication is not configured on this server."
+    });
+    return;
+  }
+  const rawToken = extractFirebaseToken(req);
+  if (!rawToken) {
+    res.status(400).json({ error: "Firebase identity token is required." });
+    return;
+  }
+  let decoded;
+  try {
+    decoded = await adminAuth.verifyIdToken(rawToken);
+  } catch (error) {
+    console.error("Firebase token verification failed:", error);
+    res.status(401).json({ error: "Invalid or expired Firebase authentication token." });
+    return;
+  }
+  const bodyName = req.body && typeof req.body === "object" && "name" in req.body ? req.body.name : void 0;
+  const result = await syncAuthenticatedFirebaseUser(decoded, {
+    name: typeof bodyName === "string" ? bodyName : void 0,
+    userAgent: req.get("user-agent")
+  });
+  setSessionCookie(res, req, result.sessionToken);
+  res.json({ user: result.user });
+});
 app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+  const dbError = getDatabaseConfigurationError();
+  res.json({
+    status: "ok",
+    databaseConfigured: !dbError,
+    firebaseConfigured: isFirebaseAdminConfigured(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  });
 });
 app.get("/api/auth/config", (_req, res) => {
   res.json({
-    emailConfigured: isEmailProviderConfigured(),
+    firebaseConfigured: isFirebaseAdminConfigured(),
     googleConfigured: isGoogleOAuthConfigured(),
-    emailVerificationEnforced: isEmailVerificationEnforced()
+    emailVerificationEnforced: false
   });
 });
-app.post(
-  "/api/auth/register",
-  asyncHandler(async (req, res) => {
-    const parsed = registerSchema.parse(req.body);
-    const result = await registerWithEmail({
-      name: parsed.name,
-      email: parsed.email,
-      password: parsed.password,
-      baseUrl: getBaseUrl(req),
-      userAgent: req.get("user-agent")
-    });
-    if (result.sessionToken) {
-      setSessionCookie(res, req, result.sessionToken);
-    }
-    res.status(201).json({
-      user: result.user,
-      requiresVerification: result.requiresVerification,
-      emailConfigured: result.emailConfigured,
-      message: result.message
-    });
-  })
-);
-app.post(
-  "/api/auth/login",
-  asyncHandler(async (req, res) => {
-    const parsed = loginSchema.parse(req.body);
-    const result = await loginWithEmail({
-      email: parsed.email,
-      password: parsed.password,
-      userAgent: req.get("user-agent")
-    });
-    setSessionCookie(res, req, result.sessionToken);
-    res.json({ user: result.user });
-  })
-);
-app.post(
-  "/api/auth/google",
-  asyncHandler(async (req, res) => {
-    if (!isGoogleOAuthConfigured()) {
-      res.status(503).json({
-        error: "Google Sign-In is not configured on this server. Add Firebase OAuth credentials in firebase-applet-config.json."
-      });
-      return;
-    }
-    const authHeader = req.headers.authorization;
-    const bodyToken = req.body && typeof req.body === "object" && "idToken" in req.body ? req.body.idToken : void 0;
-    const rawToken = typeof bodyToken === "string" && bodyToken.trim() ? bodyToken.trim() : authHeader?.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : "";
-    if (!rawToken) {
-      res.status(400).json({ error: "Google identity token is required." });
-      return;
-    }
-    let decoded;
-    try {
-      decoded = await adminAuth.verifyIdToken(rawToken);
-    } catch (error) {
-      console.error("Google token verification failed:", error);
-      res.status(401).json({ error: "Invalid or expired Google sign-in token." });
-      return;
-    }
-    const result = await authenticateWithGoogleToken(
-      decoded,
-      req.get("user-agent")
-    );
-    setSessionCookie(res, req, result.sessionToken);
-    res.json({ user: result.user });
-  })
-);
+app.post("/api/auth/session", handleFirebaseSessionSync);
+app.post("/api/auth/google", handleFirebaseSessionSync);
 app.post(
   "/api/auth/logout",
   asyncHandler(async (req, res) => {
     const rawCookie = req.cookies?.[SESSION_COOKIE_NAME];
-    if (typeof rawCookie === "string" && rawCookie.trim()) {
-      await deleteSessionByToken(rawCookie.trim());
+    if (typeof rawCookie === "string" && rawCookie.trim() && !getDatabaseConfigurationError()) {
+      await deleteSessionByToken(rawCookie.trim()).catch(() => void 0);
     }
     clearSessionCookie(res, req);
     res.json({ success: true });
-  })
-);
-app.post(
-  "/api/auth/forgot-password",
-  asyncHandler(async (req, res) => {
-    const parsed = forgotPasswordSchema.parse(req.body);
-    const result = await requestPasswordReset(parsed.email, getBaseUrl(req));
-    if (!result.emailConfigured) {
-      res.status(503).json({
-        error: result.message,
-        emailConfigured: false
-      });
-      return;
-    }
-    res.json({
-      message: result.message,
-      emailConfigured: true
-    });
-  })
-);
-app.post(
-  "/api/auth/reset-password",
-  asyncHandler(async (req, res) => {
-    const parsed = resetPasswordSchema.parse(req.body);
-    await resetPasswordWithToken(parsed.token, parsed.password);
-    clearSessionCookie(res, req);
-    res.json({
-      success: true,
-      message: "Your password has been reset. You can now sign in with your new password."
-    });
-  })
-);
-app.post(
-  "/api/auth/verify-email",
-  asyncHandler(async (req, res) => {
-    const parsed = verifyEmailSchema.parse(req.body);
-    await verifyEmailWithToken(parsed.token);
-    res.json({
-      success: true,
-      message: "Your email address has been verified."
-    });
-  })
-);
-app.post(
-  "/api/auth/resend-verification",
-  asyncHandler(async (req, res) => {
-    const parsed = resendVerificationSchema.parse(req.body);
-    const result = await resendVerificationEmail(parsed.email, getBaseUrl(req));
-    if (!result.emailConfigured) {
-      res.status(503).json({
-        error: result.message,
-        emailConfigured: false
-      });
-      return;
-    }
-    res.json({
-      message: result.message,
-      emailConfigured: true
-    });
   })
 );
 app.get(
@@ -3610,22 +2995,6 @@ app.patch(
     const parsed = updateUserSettingsSchema.parse(req.body);
     const updated = await updateUserSettings(req.dbUser.id, parsed);
     res.json({ user: updated });
-  })
-);
-app.patch(
-  "/api/me/password",
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    const parsed = changePasswordSchema.parse(req.body);
-    await changeUserPassword(
-      req.dbUser.id,
-      parsed.currentPassword,
-      parsed.newPassword
-    );
-    res.json({
-      success: true,
-      message: "Password updated successfully."
-    });
   })
 );
 app.post(
@@ -3707,8 +3076,8 @@ app.get(
   "/api/projects/:id",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const projectId = parseId(req.params.id);
-    const details = await getProjectDetails(projectId, req.dbUser.id);
+    const projectId2 = parseId(req.params.id);
+    const details = await getProjectDetails(projectId2, req.dbUser.id);
     res.json(details);
   })
 );
@@ -3716,9 +3085,9 @@ app.patch(
   "/api/projects/:id",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const projectId = parseId(req.params.id);
+    const projectId2 = parseId(req.params.id);
     const parsed = updateProjectSchema.parse(req.body);
-    const project = await updateProject(projectId, req.dbUser.id, parsed);
+    const project = await updateProject(projectId2, req.dbUser.id, parsed);
     res.json({ project });
   })
 );
@@ -3726,8 +3095,8 @@ app.delete(
   "/api/projects/:id",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const projectId = parseId(req.params.id);
-    const result = await deleteProject(projectId, req.dbUser.id);
+    const projectId2 = parseId(req.params.id);
+    const result = await deleteProject(projectId2, req.dbUser.id);
     res.json(result);
   })
 );
@@ -3735,8 +3104,8 @@ app.get(
   "/api/projects/:id/invitations",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const projectId = parseId(req.params.id);
-    const items = await listProjectInvitations(projectId, req.dbUser.id);
+    const projectId2 = parseId(req.params.id);
+    const items = await listProjectInvitations(projectId2, req.dbUser.id);
     res.json({ invitations: items });
   })
 );
@@ -3744,37 +3113,21 @@ app.post(
   "/api/projects/:id/invitations",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const projectId = parseId(req.params.id);
+    const projectId2 = parseId(req.params.id);
     const parsed = inviteMemberSchema.parse(req.body);
-    const result = await inviteMember(projectId, req.dbUser.id, {
-      ...parsed,
-      baseUrl: getBaseUrl(req)
-    });
+    const result = await inviteMember(projectId2, req.dbUser.id, parsed);
     res.status(201).json(result);
-  })
-);
-app.get(
-  "/api/invitations/email-status/:emailId",
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    const rawId = Array.isArray(req.params.emailId) ? req.params.emailId[0] : req.params.emailId;
-    if (!rawId || !/^[a-zA-Z0-9_-]{6,100}$/.test(rawId)) {
-      res.status(400).json({ error: "Invalid email tracking ID." });
-      return;
-    }
-    const status = await getResendEmailStatus(rawId);
-    res.json(status);
   })
 );
 app.patch(
   "/api/projects/:id/members/:userId",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const projectId = parseId(req.params.id);
+    const projectId2 = parseId(req.params.id);
     const targetUserId = parseId(req.params.userId);
     const parsed = updateMemberRoleSchema.parse(req.body);
     const member = await updateMemberRole(
-      projectId,
+      projectId2,
       targetUserId,
       req.dbUser.id,
       parsed.role
@@ -3786,9 +3139,9 @@ app.delete(
   "/api/projects/:id/members/:userId",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const projectId = parseId(req.params.id);
+    const projectId2 = parseId(req.params.id);
     const targetUserId = parseId(req.params.userId);
-    const result = await removeMember(projectId, targetUserId, req.dbUser.id);
+    const result = await removeMember(projectId2, targetUserId, req.dbUser.id);
     res.json(result);
   })
 );
@@ -3847,14 +3200,14 @@ app.get(
   "/api/tasks",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const projectId = typeof req.query.projectId === "string" && req.query.projectId !== "ALL" ? parseId(req.query.projectId) : void 0;
+    const projectId2 = typeof req.query.projectId === "string" && req.query.projectId !== "ALL" ? parseId(req.query.projectId) : void 0;
     const status = typeof req.query.status === "string" ? req.query.status : void 0;
     const priority = typeof req.query.priority === "string" ? req.query.priority : void 0;
     const assignee = typeof req.query.assignee === "string" ? req.query.assignee : void 0;
     const q = typeof req.query.q === "string" ? req.query.q : void 0;
     const sort = typeof req.query.sort === "string" ? req.query.sort : void 0;
     const items = await listUserTasks(req.dbUser.id, {
-      projectId,
+      projectId: projectId2,
       status,
       priority,
       assignee,
@@ -3944,11 +3297,11 @@ app.get(
   "/api/activity",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const projectId = typeof req.query.projectId === "string" && req.query.projectId !== "ALL" ? parseId(req.query.projectId) : void 0;
+    const projectId2 = typeof req.query.projectId === "string" && req.query.projectId !== "ALL" ? parseId(req.query.projectId) : void 0;
     const page = typeof req.query.page === "string" ? Number(req.query.page) : 1;
     const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : 30;
     const feed = await listAccessibleActivities(req.dbUser.id, {
-      projectId,
+      projectId: projectId2,
       page,
       limit
     });
@@ -4034,13 +3387,6 @@ async function startServer() {
   const port = Number(process.env.PORT) || 3e3;
   app.listen(port, "0.0.0.0", () => {
     console.log(`DevTrack server listening on http://0.0.0.0:${port}`);
-    verifySmtpConnection().then((status) => {
-      console.log(
-        `[EmailTransport] transport=${status.transport} verified=${status.verified} message="${status.message}"`
-      );
-    }).catch((err) => {
-      console.error("[EmailTransport] Verification error:", err);
-    });
   });
 }
 var server_default = app;

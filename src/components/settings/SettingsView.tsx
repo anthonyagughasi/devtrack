@@ -1,18 +1,24 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  EmailAuthProvider,
+  linkWithCredential,
+  reauthenticateWithCredential,
+  updatePassword,
+} from 'firebase/auth';
+import {
   CheckCircle2,
   KeyRound,
   LogOut,
-  Mail,
   Moon,
   Sun,
   Trash2,
   Upload,
 } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
+import { mapFirebaseAuthError, useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/api';
 import { cn, formatDate } from '../../lib/utils';
+import { strongPasswordSchema } from '../../lib/validations';
 import type { UserProfile } from '../../types/app';
 import { Avatar } from '../ui/Avatar';
 import { Button } from '../ui/Button';
@@ -21,7 +27,7 @@ const ALLOWED_AVATAR_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 
 export function SettingsView() {
-  const { profile, authConfig, refreshProfile, applyTheme, signOut } = useAuth();
+  const { firebaseUser, profile, refreshProfile, applyTheme, signOut } = useAuth();
   const { showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -40,7 +46,10 @@ export function SettingsView() {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [savingPassword, setSavingPassword] = useState(false);
-  const [resendingVerify, setResendingVerify] = useState(false);
+
+  const hasPasswordProvider = Boolean(
+    firebaseUser?.providerData?.some((provider) => provider.providerId === 'password')
+  );
 
   useEffect(() => {
     if (!profile) return;
@@ -143,51 +152,54 @@ export function SettingsView() {
 
   const handlePasswordUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
+    const strengthCheck = strongPasswordSchema.safeParse(newPassword);
+    if (!strengthCheck.success) {
+      showToast(
+        strengthCheck.error.issues[0]?.message ||
+          'Password does not meet security requirements.',
+        'error'
+      );
+      return;
+    }
     if (newPassword !== confirmPassword) {
       showToast('New passwords do not match.', 'error');
       return;
     }
+    if (!firebaseUser || !firebaseUser.email) {
+      showToast(
+        'Active Firebase session required. Please sign out and sign in again before changing your password.',
+        'error'
+      );
+      return;
+    }
+
     setSavingPassword(true);
     try {
-      await apiFetch('/api/me/password', {
-        method: 'PATCH',
-        body: JSON.stringify({
-          currentPassword: profile?.hasPassword ? currentPassword : '',
-          newPassword,
-          confirmPassword,
-        }),
-      });
+      if (hasPasswordProvider) {
+        if (!currentPassword) {
+          showToast('Please enter your current password.', 'error');
+          return;
+        }
+        const credential = EmailAuthProvider.credential(firebaseUser.email, currentPassword);
+        await reauthenticateWithCredential(firebaseUser, credential);
+        await updatePassword(firebaseUser, newPassword);
+      } else {
+        const credential = EmailAuthProvider.credential(firebaseUser.email, newPassword);
+        await linkWithCredential(firebaseUser, credential);
+      }
+      await firebaseUser.reload().catch(() => undefined);
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
       await refreshProfile();
       showToast(
-        profile?.hasPassword ? 'Password updated.' : 'Password set for email sign-in.',
+        hasPasswordProvider ? 'Password updated.' : 'Password set for email sign-in.',
         'success'
       );
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to update password.', 'error');
+      showToast(mapFirebaseAuthError(err, 'Failed to update password.'), 'error');
     } finally {
       setSavingPassword(false);
-    }
-  };
-
-  const handleResendVerification = async () => {
-    if (!profile) return;
-    setResendingVerify(true);
-    try {
-      const res = await apiFetch<{ message: string }>('/api/auth/resend-verification', {
-        method: 'POST',
-        body: JSON.stringify({ email: profile.email }),
-      });
-      showToast(res.message, 'success');
-    } catch (err) {
-      showToast(
-        err instanceof Error ? err.message : 'Unable to send verification email.',
-        'error'
-      );
-    } finally {
-      setResendingVerify(false);
     }
   };
 
@@ -371,17 +383,17 @@ export function SettingsView() {
         <div className="flex items-center gap-2">
           <KeyRound className="h-4 w-4 text-blue-500" />
           <h3 className="font-display text-sm font-semibold">
-            {profile.hasPassword ? 'Change Password' : 'Set Account Password'}
+            {hasPasswordProvider ? 'Change Password' : 'Set Account Password'}
           </h3>
         </div>
         <p className="text-xs text-neutral-500">
-          {profile.hasPassword
+          {hasPasswordProvider
             ? 'Update the password used for email sign-in. Passwords must be at least 8 characters and include uppercase, lowercase, and numeric characters.'
             : 'Add a password so you can also sign in directly with your email address.'}
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {profile.hasPassword && (
+          {hasPasswordProvider && (
             <div>
               <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-300 mb-1.5">
                 Current Password
@@ -428,7 +440,7 @@ export function SettingsView() {
 
         <div className="flex justify-end">
           <Button type="submit" variant="secondary" loading={savingPassword}>
-            {profile.hasPassword ? 'Update Password' : 'Set Password'}
+            {hasPasswordProvider ? 'Update Password' : 'Set Password'}
           </Button>
         </div>
       </form>
@@ -444,25 +456,10 @@ export function SettingsView() {
                 {profile.email}
               </span>
             </span>
-            {profile.emailVerified ? (
+            {profile.emailVerified && (
               <span className="inline-flex items-center gap-1 text-emerald-500 font-medium">
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 Verified
-              </span>
-            ) : (
-              <span className="inline-flex items-center gap-2 text-amber-500 font-medium">
-                <span>Unverified</span>
-                {authConfig.emailConfigured && (
-                  <button
-                    type="button"
-                    onClick={handleResendVerification}
-                    disabled={resendingVerify}
-                    className="inline-flex items-center gap-1 text-blue-500 hover:underline cursor-pointer"
-                  >
-                    <Mail className="h-3 w-3" />
-                    <span>{resendingVerify ? 'Sending...' : 'Verify email'}</span>
-                  </button>
-                )}
               </span>
             )}
           </div>

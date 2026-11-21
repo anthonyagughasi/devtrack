@@ -7,22 +7,22 @@ import React, {
   useState,
 } from 'react';
 import {
+  confirmPasswordReset,
+  createUserWithEmailAndPassword,
   onAuthStateChanged,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
   signInWithPopup,
   signOut as firebaseSignOut,
+  updateProfile,
   type User as FirebaseUser,
 } from 'firebase/auth';
-import {
-  auth,
-  googleAuthProvider,
-  recordUserFirestoreSync,
-  testFirestoreConnection,
-} from '../lib/firebase';
+import { auth, googleAuthProvider, isFirebaseClientConfigured } from '../lib/firebase';
 import { ApiError, apiFetch } from '../lib/api';
 import type { UserProfile } from '../types/app';
 
 export interface AuthConfig {
-  emailConfigured: boolean;
+  firebaseConfigured: boolean;
   googleConfigured: boolean;
   emailVerificationEnforced: boolean;
 }
@@ -30,7 +30,6 @@ export interface AuthConfig {
 export interface RegisterResult {
   user: UserProfile;
   requiresVerification: boolean;
-  emailConfigured: boolean;
   message: string;
 }
 
@@ -48,6 +47,8 @@ interface AuthContextValue {
     password: string;
     confirmPassword: string;
   }) => Promise<RegisterResult>;
+  requestPasswordReset: (email: string) => Promise<string>;
+  confirmPasswordResetWithCode: (oobCode: string, newPassword: string) => Promise<void>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   applyTheme: (theme: 'dark' | 'light') => void;
@@ -81,14 +82,56 @@ function clearSessionHint(): void {
   }
 }
 
+export function mapFirebaseAuthError(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) {
+    return error.message;
+  }
+
+  const code =
+    error && typeof error === 'object' && 'code' in error
+      ? String((error as { code?: unknown }).code ?? '')
+      : '';
+
+  switch (code) {
+    case 'auth/email-already-in-use':
+      return 'An account with this email address already exists.';
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return 'Invalid email address or password.';
+    case 'auth/invalid-email':
+      return 'Please enter a valid email address.';
+    case 'auth/weak-password':
+      return 'Password does not meet minimum security requirements.';
+    case 'auth/too-many-requests':
+      return 'Too many attempts. Please wait a moment and try again.';
+    case 'auth/popup-closed-by-user':
+      return 'Google sign-in popup was closed before completing.';
+    case 'auth/popup-blocked':
+      return 'Sign-in popup was blocked by your browser. Please allow popups and try again.';
+    case 'auth/account-exists-with-different-credential':
+      return 'An account already exists with this email using a different sign-in method.';
+    case 'auth/operation-not-allowed':
+      return 'This sign-in method is not enabled in Firebase Authentication yet.';
+    case 'auth/expired-action-code':
+      return 'This password reset link has expired. Please request a new one.';
+    case 'auth/invalid-action-code':
+      return 'This password reset link is invalid or has already been used.';
+    case 'auth/requires-recent-login':
+      return 'Please sign in again before changing your password.';
+    default:
+      return error instanceof Error && error.message ? error.message : fallback;
+  }
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authConfig, setAuthConfig] = useState<AuthConfig>({
-    emailConfigured: false,
-    googleConfigured: true,
+    firebaseConfigured: isFirebaseClientConfigured(),
+    googleConfigured: isFirebaseClientConfigured(),
     emailVerificationEnforced: false,
   });
 
@@ -102,7 +145,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const syncInFlightRef = useRef<Promise<void> | null>(null);
-  const firebaseSyncInFlightRef = useRef<Promise<void> | null>(null);
+  const firebaseSyncInFlightRef = useRef<Promise<UserProfile | null> | null>(null);
   const initializedRef = useRef(false);
   const signingOutRef = useRef(false);
 
@@ -142,30 +185,44 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [applyTheme]
   );
 
-  const syncFirebaseUser = useCallback(
-    async (user: FirebaseUser) => {
-      if (firebaseSyncInFlightRef.current) {
+  const syncFirebaseSession = useCallback(
+    async (
+      user: FirebaseUser,
+      options?: { name?: string; forceTokenRefresh?: boolean; throwOnError?: boolean }
+    ): Promise<UserProfile | null> => {
+      if (firebaseSyncInFlightRef.current && !options?.throwOnError) {
         return firebaseSyncInFlightRef.current;
       }
 
       const promise = (async () => {
         try {
-          const idToken = await user.getIdToken();
-          const data = await apiFetch<{ user: UserProfile }>('/api/auth/google', {
+          const idToken = await user.getIdToken(Boolean(options?.forceTokenRefresh));
+          const data = await apiFetch<{ user: UserProfile }>('/api/auth/session', {
             method: 'POST',
-            body: JSON.stringify({ idToken }),
+            headers: {
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              idToken,
+              ...(options?.name ? { name: options.name } : {}),
+            }),
           });
           markSessionHint();
           setProfile(data.user);
           applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
           setAuthError(null);
+          return data.user;
         } catch (err) {
+          if (options?.throwOnError) {
+            throw err;
+          }
           if (hasSessionHint()) {
             await syncProfile(true);
           }
-          if (err instanceof ApiError && (err.status === 404 || err.status >= 500)) {
+          if (err instanceof ApiError && (err.status === 404 || err.status === 409 || err.status >= 500)) {
             setAuthError(err.message);
           }
+          return null;
         } finally {
           firebaseSyncInFlightRef.current = null;
         }
@@ -185,13 +242,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const cfg = await apiFetch<AuthConfig>('/api/auth/config');
         if (active) setAuthConfig(cfg);
       } catch {
-        // Non-fatal fallback to defaults
+        // Non-fatal fallback to client Firebase config
       }
 
       try {
         await auth.authStateReady();
       } catch {
-        // Continue with session-hint check if Firebase Auth readiness fails
+        // Continue with session check if Firebase readiness fails
       }
 
       if (!active) return;
@@ -200,7 +257,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setFirebaseUser(currentUser);
 
       if (currentUser && !signingOutRef.current) {
-        await syncFirebaseUser(currentUser);
+        await syncFirebaseSession(currentUser);
       } else if (hasSessionHint()) {
         await syncProfile(true);
       } else {
@@ -216,14 +273,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     init();
-    void testFirestoreConnection();
 
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!active) return;
       setFirebaseUser(user);
       if (!initializedRef.current) return;
       if (user && !signingOutRef.current) {
-        await syncFirebaseUser(user);
+        await syncFirebaseSession(user);
       }
     });
 
@@ -231,7 +287,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       active = false;
       unsub();
     };
-  }, [syncProfile, syncFirebaseUser, applyTheme]);
+  }, [syncProfile, syncFirebaseSession, applyTheme]);
 
   const signInWithGoogle = useCallback(async () => {
     setAuthError(null);
@@ -244,41 +300,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     try {
       const cred = await signInWithPopup(auth, googleAuthProvider);
-      const idToken = await cred.user.getIdToken();
-      const data = await apiFetch<{ user: UserProfile }>('/api/auth/google', {
-        method: 'POST',
-        body: JSON.stringify({ idToken }),
-      });
-      markSessionHint();
-      setProfile(data.user);
-      applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
-      setAuthError(null);
-      if (cred.user.emailVerified) {
-        void recordUserFirestoreSync(cred.user.uid).catch(() => undefined);
-      }
+      await syncFirebaseSession(cred.user, { throwOnError: true });
     } catch (err: unknown) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : 'Google sign-in was cancelled or failed.';
+      const msg = mapFirebaseAuthError(err, 'Google sign-in was cancelled or failed.');
       setAuthError(msg);
-      throw err;
+      throw new Error(msg);
     }
-  }, [authConfig.googleConfigured, applyTheme]);
+  }, [authConfig.googleConfigured, syncFirebaseSession]);
 
   const loginWithEmail = useCallback(
     async (email: string, password: string): Promise<UserProfile> => {
       setAuthError(null);
-      const data = await apiFetch<{ user: UserProfile }>('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password }),
-      });
-      markSessionHint();
-      setProfile(data.user);
-      applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
-      return data.user;
+      try {
+        const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+        const user = await syncFirebaseSession(cred.user, { throwOnError: true });
+        if (!user) {
+          throw new Error('Failed to load workspace profile.');
+        }
+        return user;
+      } catch (err: unknown) {
+        const msg = mapFirebaseAuthError(err, 'Unable to sign in right now.');
+        throw new Error(msg);
+      }
     },
-    [applyTheme]
+    [syncFirebaseSession]
   );
 
   const registerWithEmail = useCallback(
@@ -289,18 +334,70 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       confirmPassword: string;
     }): Promise<RegisterResult> => {
       setAuthError(null);
-      const result = await apiFetch<RegisterResult>('/api/auth/register', {
-        method: 'POST',
-        body: JSON.stringify(input),
-      });
-      if (!result.requiresVerification) {
-        markSessionHint();
-        setProfile(result.user);
-        applyTheme(result.user.themePreference === 'light' ? 'light' : 'dark');
+      const cleanName = input.name.trim();
+      try {
+        const cred = await createUserWithEmailAndPassword(
+          auth,
+          input.email.trim(),
+          input.password
+        );
+        await updateProfile(cred.user, { displayName: cleanName }).catch(() => undefined);
+
+        try {
+          const user = await syncFirebaseSession(cred.user, {
+            name: cleanName,
+            forceTokenRefresh: true,
+            throwOnError: true,
+          });
+          if (!user) {
+            throw new Error('Failed to initialize workspace profile.');
+          }
+          return {
+            user,
+            requiresVerification: false,
+            message: 'Account created successfully.',
+          };
+        } catch (syncErr) {
+          if (syncErr instanceof ApiError && syncErr.status === 409) {
+            await firebaseSignOut(auth).catch(() => undefined);
+          }
+          throw syncErr;
+        }
+      } catch (err: unknown) {
+        const msg = mapFirebaseAuthError(err, 'Unable to create account.');
+        throw new Error(msg);
       }
-      return result;
     },
-    [applyTheme]
+    [syncFirebaseSession]
+  );
+
+  const requestPasswordReset = useCallback(async (email: string): Promise<string> => {
+    try {
+      await sendPasswordResetEmail(auth, email.trim());
+      return 'If an account exists with that email address, Firebase Authentication has sent password reset instructions.';
+    } catch (err: unknown) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? String((err as { code?: unknown }).code ?? '')
+          : '';
+      if (code === 'auth/user-not-found') {
+        return 'If an account exists with that email address, Firebase Authentication has sent password reset instructions.';
+      }
+      throw new Error(mapFirebaseAuthError(err, 'Failed to send password reset email.'));
+    }
+  }, []);
+
+  const confirmPasswordResetWithCode = useCallback(
+    async (oobCode: string, newPassword: string): Promise<void> => {
+      try {
+        await confirmPasswordReset(auth, oobCode.trim(), newPassword);
+      } catch (err: unknown) {
+        throw new Error(
+          mapFirebaseAuthError(err, 'Unable to reset password with this link.')
+        );
+      }
+    },
+    []
   );
 
   const signOut = useCallback(async () => {
@@ -337,6 +434,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signInWithGoogle,
         loginWithEmail,
         registerWithEmail,
+        requestPasswordReset,
+        confirmPasswordResetWithCode,
         signOut,
         refreshProfile,
         applyTheme,

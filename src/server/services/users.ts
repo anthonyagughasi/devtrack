@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
-import { assertDatabaseConfigured, db } from '../../db/index.ts';
-import { users } from '../../db/schema.ts';
+import { assertDatabaseConfigured, db, type Database } from '../../db/index.ts';
+import { oauthAccounts, users } from '../../db/schema.ts';
 import { AppError, mapDatabaseError } from '../errors.ts';
 
 export interface DbUserRow {
@@ -39,6 +39,17 @@ export interface UserRecord {
   updatedAt: Date;
 }
 
+export interface SyncFirebaseUserInput {
+  uid: string;
+  email?: string | null;
+  emailVerified?: boolean;
+  name?: string | null;
+  avatar?: string | null;
+  provider?: string | null;
+}
+
+type DbOrTx = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
+
 export function sanitizeUser(row: DbUserRow): UserRecord {
   return {
     id: row.id,
@@ -59,111 +70,167 @@ export function sanitizeUser(row: DbUserRow): UserRecord {
   };
 }
 
-export async function getOrCreateUser(
-  uid: string,
-  email: string,
-  name?: string,
-  avatar?: string | null,
-  markEmailVerified = false
-): Promise<UserRecord> {
-  try {
-    assertDatabaseConfigured();
-    const cleanEmail = email.trim().toLowerCase();
-    const displayName = name?.trim() || cleanEmail.split('@')[0] || 'Developer';
+async function ensureOAuthAccountLink(
+  executor: DbOrTx,
+  userId: number,
+  provider: string,
+  providerAccountId: string
+): Promise<void> {
+  await executor
+    .insert(oauthAccounts)
+    .values({
+      userId,
+      provider,
+      providerAccountId,
+    })
+    .onConflictDoNothing();
+}
 
-    const byUid = await db
-      .select()
-      .from(users)
-      .where(eq(users.uid, uid))
-      .limit(1);
+export async function syncFirebaseUserWithExecutor(
+  executor: DbOrTx,
+  input: SyncFirebaseUserInput
+): Promise<{ user: UserRecord; isNewUser: boolean }> {
+  const cleanEmail = (input.email?.trim() || `${input.uid}@users.devtrack.app`).toLowerCase();
+  const hasRealEmail = Boolean(input.email && input.email.trim());
+  const isVerified = Boolean(input.emailVerified);
+  const provider = (input.provider?.trim() || 'firebase').toLowerCase();
+  const displayName =
+    input.name?.trim() || cleanEmail.split('@')[0] || 'Developer';
 
-    if (byUid.length > 0) {
-      const updates: Partial<typeof users.$inferInsert> = {};
-      if (byUid[0].email !== cleanEmail) updates.email = cleanEmail;
-      if (markEmailVerified && !byUid[0].emailVerifiedAt) {
-        updates.emailVerifiedAt = new Date();
-      }
-      if (Object.keys(updates).length > 0) {
-        updates.updatedAt = new Date();
-        const updated = await db
-          .update(users)
-          .set(updates)
-          .where(eq(users.uid, uid))
-          .returning();
-        return sanitizeUser(updated[0]);
-      }
-      return sanitizeUser(byUid[0]);
+  const byUid = await executor
+    .select()
+    .from(users)
+    .where(eq(users.uid, input.uid))
+    .limit(1);
+
+  if (byUid.length > 0) {
+    const existing = byUid[0];
+    const updates: Partial<typeof users.$inferInsert> = {};
+    if (hasRealEmail && existing.email !== cleanEmail) {
+      updates.email = cleanEmail;
+    }
+    if (isVerified && !existing.emailVerifiedAt) {
+      updates.emailVerifiedAt = new Date();
+    }
+    if (!existing.avatar && input.avatar) {
+      updates.avatar = input.avatar;
+    }
+    if (input.name?.trim() && (!existing.name || existing.name === cleanEmail.split('@')[0])) {
+      updates.name = input.name.trim();
     }
 
-    const byEmail = await db
+    let finalRow = existing;
+    if (Object.keys(updates).length > 0) {
+      updates.updatedAt = new Date();
+      const updated = await executor
+        .update(users)
+        .set(updates)
+        .where(eq(users.id, existing.id))
+        .returning();
+      finalRow = updated[0];
+    }
+
+    await ensureOAuthAccountLink(executor, finalRow.id, provider, input.uid);
+    return { user: sanitizeUser(finalRow), isNewUser: false };
+  }
+
+  const linkedByOAuth = await executor
+    .select({ user: users })
+    .from(oauthAccounts)
+    .innerJoin(users, eq(oauthAccounts.userId, users.id))
+    .where(eq(oauthAccounts.providerAccountId, input.uid))
+    .limit(1);
+
+  if (linkedByOAuth.length > 0) {
+    const existing = linkedByOAuth[0].user;
+    const updates: Partial<typeof users.$inferInsert> = {};
+    if (isVerified && !existing.emailVerifiedAt) {
+      updates.emailVerifiedAt = new Date();
+    }
+    if (!existing.avatar && input.avatar) {
+      updates.avatar = input.avatar;
+    }
+    let finalRow = existing;
+    if (Object.keys(updates).length > 0) {
+      updates.updatedAt = new Date();
+      const updated = await executor
+        .update(users)
+        .set(updates)
+        .where(eq(users.id, existing.id))
+        .returning();
+      finalRow = updated[0];
+    }
+    await ensureOAuthAccountLink(executor, finalRow.id, provider, input.uid);
+    return { user: sanitizeUser(finalRow), isNewUser: false };
+  }
+
+  if (hasRealEmail) {
+    const byEmail = await executor
       .select()
       .from(users)
       .where(eq(users.email, cleanEmail))
       .limit(1);
 
     if (byEmail.length > 0) {
-      const updated = await db
+      const existing = byEmail[0];
+      if (!isVerified) {
+        throw new AppError(
+          409,
+          'An account with this email address already exists. Sign in with your original method or verify your email before linking.'
+        );
+      }
+
+      const updated = await executor
         .update(users)
         .set({
-          uid,
-          avatar: byEmail[0].avatar ?? avatar ?? null,
-          emailVerifiedAt:
-            byEmail[0].emailVerifiedAt ?? (markEmailVerified ? new Date() : null),
+          avatar: existing.avatar ?? input.avatar ?? null,
+          emailVerifiedAt: existing.emailVerifiedAt ?? new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(users.id, byEmail[0].id))
+        .where(eq(users.id, existing.id))
         .returning();
-      return sanitizeUser(updated[0]);
+
+      await ensureOAuthAccountLink(executor, updated[0].id, provider, input.uid);
+      return { user: sanitizeUser(updated[0]), isNewUser: false };
     }
+  }
 
-    const inserted = await db
-      .insert(users)
-      .values({
-        uid,
-        email: cleanEmail,
-        name: displayName,
-        avatar: avatar ?? null,
-        emailVerifiedAt: markEmailVerified ? new Date() : null,
-      })
-      .onConflictDoNothing()
-      .returning();
+  const inserted = await executor
+    .insert(users)
+    .values({
+      uid: input.uid,
+      email: cleanEmail,
+      name: displayName,
+      avatar: input.avatar ?? null,
+      emailVerifiedAt: isVerified ? new Date() : null,
+    })
+    .returning();
 
-    if (inserted.length > 0) {
-      return sanitizeUser(inserted[0]);
-    }
+  await ensureOAuthAccountLink(executor, inserted[0].id, provider, input.uid);
+  return { user: sanitizeUser(inserted[0]), isNewUser: true };
+}
 
-    const retryByUid = await db
-      .select()
-      .from(users)
-      .where(eq(users.uid, uid))
-      .limit(1);
-    if (retryByUid.length > 0) return sanitizeUser(retryByUid[0]);
-
-    const retryByEmail = await db
-      .select()
-      .from(users)
-      .where(eq(users.email, cleanEmail))
-      .limit(1);
-    if (retryByEmail.length > 0) {
-      const updated = await db
-        .update(users)
-        .set({
-          uid,
-          emailVerifiedAt:
-            retryByEmail[0].emailVerifiedAt ?? (markEmailVerified ? new Date() : null),
-          updatedAt: new Date(),
-        })
-        .where(eq(users.id, retryByEmail[0].id))
-        .returning();
-      return sanitizeUser(updated[0]);
-    }
-
-    throw new AppError(500, 'Failed to synchronize user profile.');
+export async function syncFirebaseUser(
+  input: SyncFirebaseUserInput
+): Promise<{ user: UserRecord; isNewUser: boolean }> {
+  try {
+    assertDatabaseConfigured();
+    return await db.transaction(async (tx) => syncFirebaseUserWithExecutor(tx, input));
   } catch (error) {
     if (error instanceof AppError) throw error;
+
+    // Retry once if a concurrent request inserted the same uid/email between select & insert
     const mapped = mapDatabaseError(error);
+    if (mapped?.statusCode === 409) {
+      try {
+        return await db.transaction(async (tx) => syncFirebaseUserWithExecutor(tx, input));
+      } catch (retryError) {
+        if (retryError instanceof AppError) throw retryError;
+      }
+    }
+
     if (mapped) throw mapped;
-    console.error('Failed to upsert user:', error);
+    console.error('Failed to synchronize Firebase user:', error);
     throw new AppError(500, 'Failed to synchronize user profile.', { cause: error });
   }
 }
@@ -181,6 +248,7 @@ export async function updateUserSettings(
   }
 ): Promise<UserRecord> {
   try {
+    assertDatabaseConfigured();
     const updatePayload: Partial<typeof users.$inferInsert> = {
       updatedAt: new Date(),
     };
@@ -206,6 +274,8 @@ export async function updateUserSettings(
     return sanitizeUser(updated);
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error('Failed to update user settings:', error);
     throw new AppError(500, 'Failed to update settings.', { cause: error });
   }
@@ -216,6 +286,7 @@ export async function updateUserAvatar(
   avatarDataUri: string | null
 ): Promise<UserRecord> {
   try {
+    assertDatabaseConfigured();
     const [updated] = await db
       .update(users)
       .set({
@@ -232,6 +303,8 @@ export async function updateUserAvatar(
     return sanitizeUser(updated);
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error('Failed to update user avatar:', error);
     throw new AppError(500, 'Failed to update profile picture.', { cause: error });
   }

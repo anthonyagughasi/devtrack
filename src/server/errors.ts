@@ -92,7 +92,7 @@ export function mapDatabaseError(
   ) {
     return new AppError(
       503,
-      'Database service is unavailable. Verify DATABASE_URL or SQL_* connection settings and network access.',
+      'Cloud SQL database is unavailable. Verify CLOUD_SQL_CONNECTION_NAME / SQL_HOST, network access, and SSL configuration.',
       { cause: error }
     );
   }
@@ -100,7 +100,7 @@ export function mapDatabaseError(
   if (code === '28P01' || code === '28000') {
     return new AppError(
       503,
-      'Database authentication failed. Check the database credentials in server environment variables.',
+      'Database authentication failed. Check SQL_USER and SQL_PASSWORD in server environment variables.',
       { cause: error }
     );
   }
@@ -108,7 +108,7 @@ export function mapDatabaseError(
   if (code === '3D000') {
     return new AppError(
       503,
-      'Configured database does not exist. Verify SQL_DB_NAME or DATABASE_URL.',
+      'Configured database does not exist. Verify SQL_DB_NAME in server environment variables.',
       { cause: error }
     );
   }
@@ -116,7 +116,7 @@ export function mapDatabaseError(
   if (code === '42P01') {
     return new AppError(
       503,
-      'Database tables are not initialized. Push the schema to the configured PostgreSQL database.',
+      'Database tables are not initialized. Push the schema to the configured Cloud SQL database.',
       { cause: error }
     );
   }

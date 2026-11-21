@@ -24,7 +24,6 @@ const PATH_TO_AUTH_ROUTE: Record<string, AuthRoute> = {
   '/register': 'register',
   '/forgot-password': 'forgot-password',
   '/reset-password': 'reset-password',
-  '/verify-email': 'verify-email',
 };
 
 function parseAuthLocation(): { route: AuthRoute; token?: string } {
@@ -34,8 +33,14 @@ function parseAuthLocation(): { route: AuthRoute; token?: string } {
 
   const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
   const params = new URLSearchParams(window.location.search);
-  const token = params.get('token')?.trim() || undefined;
+  const oobCode = params.get('oobCode')?.trim();
+  const mode = params.get('mode')?.trim();
+  const token = oobCode || params.get('token')?.trim() || undefined;
   const viewParam = params.get('view')?.trim();
+
+  if (mode === 'resetPassword' && oobCode) {
+    return { route: 'reset-password', token: oobCode };
+  }
 
   if (pathname in PATH_TO_AUTH_ROUTE) {
     return { route: PATH_TO_AUTH_ROUTE[pathname], token };
@@ -45,8 +50,7 @@ function parseAuthLocation(): { route: AuthRoute; token?: string } {
     viewParam === 'login' ||
     viewParam === 'register' ||
     viewParam === 'forgot-password' ||
-    viewParam === 'reset-password' ||
-    viewParam === 'verify-email'
+    viewParam === 'reset-password'
   ) {
     return { route: viewParam, token };
   }
@@ -57,7 +61,7 @@ function parseAuthLocation(): { route: AuthRoute; token?: string } {
 function authRouteToPath(route: AuthRoute, token?: string): string {
   const base = route === 'landing' ? '/' : `/${route}`;
   if (token) {
-    return `${base}?token=${encodeURIComponent(token)}`;
+    return `${base}?oobCode=${encodeURIComponent(token)}`;
   }
   return base;
 }
@@ -136,11 +140,8 @@ function WorkspaceRouter() {
     );
   }
 
-  // Allow email verification or password reset links to render even if another session was active
-  if (
-    (authLoc.route === 'verify-email' || authLoc.route === 'reset-password') &&
-    (authLoc.token || !profile)
-  ) {
+  // Allow password reset links to render even if another session was active
+  if (authLoc.route === 'reset-password' && (authLoc.token || !profile)) {
     return (
       <AuthViews
         route={authLoc.route}

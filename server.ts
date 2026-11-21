@@ -5,49 +5,30 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { ZodError } from 'zod';
-import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
-import { adminAuth } from './src/lib/firebase-admin.ts';
+import { getDatabaseConfigurationError } from './src/db/index.ts';
+import firebaseAppletConfig from './firebase-applet-config.json' with { type: 'json' };
+import { adminAuth, isFirebaseAdminConfigured } from './src/lib/firebase-admin.ts';
 import {
   acceptInvitationSchema,
-  changePasswordSchema,
   commentSchema,
   createProjectSchema,
   createTaskSchema,
-  forgotPasswordSchema,
   inviteMemberSchema,
-  loginSchema,
   moveTaskSchema,
-  registerSchema,
-  resendVerificationSchema,
-  resetPasswordSchema,
   updateMemberRoleSchema,
   updateProjectSchema,
   updateTaskSchema,
   updateUserSettingsSchema,
-  verifyEmailSchema,
 } from './src/lib/validations.ts';
 import { isAppError } from './src/server/errors.ts';
 import { requireAuth, type AuthRequest } from './src/server/middleware/auth.ts';
 import { listAccessibleActivities } from './src/server/services/activity.ts';
 import {
   SESSION_COOKIE_NAME,
-  authenticateWithGoogleToken,
-  changeUserPassword,
   deleteSessionByToken,
-  isEmailVerificationEnforced,
-  loginWithEmail,
-  registerWithEmail,
-  requestPasswordReset,
-  resendVerificationEmail,
-  resetPasswordWithToken,
-  verifyEmailWithToken,
+  syncAuthenticatedFirebaseUser,
 } from './src/server/services/auth.ts';
 import { getDashboardAnalytics } from './src/server/services/dashboard.ts';
-import {
-  getResendEmailStatus,
-  isEmailProviderConfigured,
-  verifySmtpConnection,
-} from './src/server/services/email.ts';
 import {
   getUserNotifications,
   markAllNotificationsRead,
@@ -118,11 +99,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 function isGoogleOAuthConfigured(): boolean {
-  return Boolean(
-    firebaseConfig.apiKey &&
-      firebaseConfig.projectId &&
-      firebaseConfig.oAuthClientId
-  );
+  const apiKey = process.env.VITE_FIREBASE_API_KEY?.trim() || firebaseAppletConfig.apiKey;
+  const authDomain =
+    process.env.VITE_FIREBASE_AUTH_DOMAIN?.trim() || firebaseAppletConfig.authDomain;
+  const projectId =
+    process.env.FIREBASE_PROJECT_ID?.trim() ||
+    process.env.VITE_FIREBASE_PROJECT_ID?.trim() ||
+    firebaseAppletConfig.projectId;
+  return Boolean(apiKey && authDomain && projectId);
 }
 
 const app = express();
@@ -147,19 +131,6 @@ function isHttpsRequest(req: Request): boolean {
     Boolean(process.env.VERCEL) ||
     (process.env.APP_URL?.trim().startsWith('https://') ?? false)
   );
-}
-
-function getBaseUrl(req: Request): string {
-  const configured = process.env.APP_URL?.trim().replace(/\/$/, '');
-  if (configured && configured !== 'MY_APP_URL') {
-    return configured;
-  }
-  const host = req.get('host');
-  if (!host) {
-    return 'http://localhost:3000';
-  }
-  const proto = isHttpsRequest(req) ? 'https' : req.protocol;
-  return `${proto}://${host}`;
 }
 
 function setSessionCookie(res: Response, req: Request, rawToken: string) {
@@ -200,177 +171,91 @@ function asyncHandler(
   };
 }
 
-// Health check
-app.get('/api/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+function extractFirebaseToken(req: Request): string {
+  const authHeader = req.headers.authorization;
+  const bodyToken =
+    req.body && typeof req.body === 'object' && 'idToken' in req.body
+      ? (req.body as { idToken?: unknown }).idToken
+      : undefined;
+
+  if (typeof bodyToken === 'string' && bodyToken.trim()) {
+    return bodyToken.trim();
+  }
+  if (authHeader?.startsWith('Bearer ')) {
+    return authHeader.slice('Bearer '.length).trim();
+  }
+  return '';
+}
+
+const handleFirebaseSessionSync = asyncHandler(async (req, res) => {
+  if (!isFirebaseAdminConfigured()) {
+    res.status(503).json({
+      error: 'Firebase Authentication is not configured on this server.',
+    });
+    return;
+  }
+
+  const rawToken = extractFirebaseToken(req);
+  if (!rawToken) {
+    res.status(400).json({ error: 'Firebase identity token is required.' });
+    return;
+  }
+
+  let decoded;
+  try {
+    decoded = await adminAuth.verifyIdToken(rawToken);
+  } catch (error) {
+    console.error('Firebase token verification failed:', error);
+    res.status(401).json({ error: 'Invalid or expired Firebase authentication token.' });
+    return;
+  }
+
+  const bodyName =
+    req.body && typeof req.body === 'object' && 'name' in req.body
+      ? (req.body as { name?: unknown }).name
+      : undefined;
+
+  const result = await syncAuthenticatedFirebaseUser(decoded, {
+    name: typeof bodyName === 'string' ? bodyName : undefined,
+    userAgent: req.get('user-agent'),
+  });
+
+  setSessionCookie(res, req, result.sessionToken);
+  res.json({ user: result.user });
 });
 
-// Authentication Configuration & Endpoints
-app.get('/api/auth/config', (_req: Request, res: Response) => {
+// Health check
+app.get('/api/health', (_req: Request, res: Response) => {
+  const dbError = getDatabaseConfigurationError();
   res.json({
-    emailConfigured: isEmailProviderConfigured(),
-    googleConfigured: isGoogleOAuthConfigured(),
-    emailVerificationEnforced: isEmailVerificationEnforced(),
+    status: 'ok',
+    databaseConfigured: !dbError,
+    firebaseConfigured: isFirebaseAdminConfigured(),
+    timestamp: new Date().toISOString(),
   });
 });
 
-app.post(
-  '/api/auth/register',
-  asyncHandler(async (req, res) => {
-    const parsed = registerSchema.parse(req.body);
-    const result = await registerWithEmail({
-      name: parsed.name,
-      email: parsed.email,
-      password: parsed.password,
-      baseUrl: getBaseUrl(req),
-      userAgent: req.get('user-agent'),
-    });
+// Authentication Configuration & Firebase Session Endpoints
+app.get('/api/auth/config', (_req: Request, res: Response) => {
+  res.json({
+    firebaseConfigured: isFirebaseAdminConfigured(),
+    googleConfigured: isGoogleOAuthConfigured(),
+    emailVerificationEnforced: false,
+  });
+});
 
-    if (result.sessionToken) {
-      setSessionCookie(res, req, result.sessionToken);
-    }
-
-    res.status(201).json({
-      user: result.user,
-      requiresVerification: result.requiresVerification,
-      emailConfigured: result.emailConfigured,
-      message: result.message,
-    });
-  })
-);
-
-app.post(
-  '/api/auth/login',
-  asyncHandler(async (req, res) => {
-    const parsed = loginSchema.parse(req.body);
-    const result = await loginWithEmail({
-      email: parsed.email,
-      password: parsed.password,
-      userAgent: req.get('user-agent'),
-    });
-    setSessionCookie(res, req, result.sessionToken);
-    res.json({ user: result.user });
-  })
-);
-
-app.post(
-  '/api/auth/google',
-  asyncHandler(async (req, res) => {
-    if (!isGoogleOAuthConfigured()) {
-      res.status(503).json({
-        error:
-          'Google Sign-In is not configured on this server. Add Firebase OAuth credentials in firebase-applet-config.json.',
-      });
-      return;
-    }
-
-    const authHeader = req.headers.authorization;
-    const bodyToken =
-      req.body && typeof req.body === 'object' && 'idToken' in req.body
-        ? (req.body as { idToken?: unknown }).idToken
-        : undefined;
-    const rawToken =
-      typeof bodyToken === 'string' && bodyToken.trim()
-        ? bodyToken.trim()
-        : authHeader?.startsWith('Bearer ')
-          ? authHeader.slice('Bearer '.length).trim()
-          : '';
-
-    if (!rawToken) {
-      res.status(400).json({ error: 'Google identity token is required.' });
-      return;
-    }
-
-    let decoded;
-    try {
-      decoded = await adminAuth.verifyIdToken(rawToken);
-    } catch (error) {
-      console.error('Google token verification failed:', error);
-      res.status(401).json({ error: 'Invalid or expired Google sign-in token.' });
-      return;
-    }
-
-    const result = await authenticateWithGoogleToken(
-      decoded,
-      req.get('user-agent')
-    );
-    setSessionCookie(res, req, result.sessionToken);
-    res.json({ user: result.user });
-  })
-);
+app.post('/api/auth/session', handleFirebaseSessionSync);
+app.post('/api/auth/google', handleFirebaseSessionSync);
 
 app.post(
   '/api/auth/logout',
   asyncHandler(async (req, res) => {
     const rawCookie = req.cookies?.[SESSION_COOKIE_NAME];
-    if (typeof rawCookie === 'string' && rawCookie.trim()) {
-      await deleteSessionByToken(rawCookie.trim());
+    if (typeof rawCookie === 'string' && rawCookie.trim() && !getDatabaseConfigurationError()) {
+      await deleteSessionByToken(rawCookie.trim()).catch(() => undefined);
     }
     clearSessionCookie(res, req);
     res.json({ success: true });
-  })
-);
-
-app.post(
-  '/api/auth/forgot-password',
-  asyncHandler(async (req, res) => {
-    const parsed = forgotPasswordSchema.parse(req.body);
-    const result = await requestPasswordReset(parsed.email, getBaseUrl(req));
-    if (!result.emailConfigured) {
-      res.status(503).json({
-        error: result.message,
-        emailConfigured: false,
-      });
-      return;
-    }
-    res.json({
-      message: result.message,
-      emailConfigured: true,
-    });
-  })
-);
-
-app.post(
-  '/api/auth/reset-password',
-  asyncHandler(async (req, res) => {
-    const parsed = resetPasswordSchema.parse(req.body);
-    await resetPasswordWithToken(parsed.token, parsed.password);
-    clearSessionCookie(res, req);
-    res.json({
-      success: true,
-      message: 'Your password has been reset. You can now sign in with your new password.',
-    });
-  })
-);
-
-app.post(
-  '/api/auth/verify-email',
-  asyncHandler(async (req, res) => {
-    const parsed = verifyEmailSchema.parse(req.body);
-    await verifyEmailWithToken(parsed.token);
-    res.json({
-      success: true,
-      message: 'Your email address has been verified.',
-    });
-  })
-);
-
-app.post(
-  '/api/auth/resend-verification',
-  asyncHandler(async (req, res) => {
-    const parsed = resendVerificationSchema.parse(req.body);
-    const result = await resendVerificationEmail(parsed.email, getBaseUrl(req));
-    if (!result.emailConfigured) {
-      res.status(503).json({
-        error: result.message,
-        emailConfigured: false,
-      });
-      return;
-    }
-    res.json({
-      message: result.message,
-      emailConfigured: true,
-    });
   })
 );
 
@@ -390,23 +275,6 @@ app.patch(
     const parsed = updateUserSettingsSchema.parse(req.body);
     const updated = await updateUserSettings(req.dbUser!.id, parsed);
     res.json({ user: updated });
-  })
-);
-
-app.patch(
-  '/api/me/password',
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    const parsed = changePasswordSchema.parse(req.body);
-    await changeUserPassword(
-      req.dbUser!.id,
-      parsed.currentPassword,
-      parsed.newPassword
-    );
-    res.json({
-      success: true,
-      message: 'Password updated successfully.',
-    });
   })
 );
 
@@ -541,27 +409,8 @@ app.post(
   asyncHandler(async (req, res) => {
     const projectId = parseId(req.params.id);
     const parsed = inviteMemberSchema.parse(req.body);
-    const result = await inviteMember(projectId, req.dbUser!.id, {
-      ...parsed,
-      baseUrl: getBaseUrl(req),
-    });
+    const result = await inviteMember(projectId, req.dbUser!.id, parsed);
     res.status(201).json(result);
-  })
-);
-
-app.get(
-  '/api/invitations/email-status/:emailId',
-  requireAuth,
-  asyncHandler(async (req, res) => {
-    const rawId = Array.isArray(req.params.emailId)
-      ? req.params.emailId[0]
-      : req.params.emailId;
-    if (!rawId || !/^[a-zA-Z0-9_-]{6,100}$/.test(rawId)) {
-      res.status(400).json({ error: 'Invalid email tracking ID.' });
-      return;
-    }
-    const status = await getResendEmailStatus(rawId);
-    res.json(status);
   })
 );
 
@@ -879,15 +728,6 @@ async function startServer() {
   const port = Number(process.env.PORT) || 3000;
   app.listen(port, '0.0.0.0', () => {
     console.log(`DevTrack server listening on http://0.0.0.0:${port}`);
-    verifySmtpConnection()
-      .then((status) => {
-        console.log(
-          `[EmailTransport] transport=${status.transport} verified=${status.verified} message="${status.message}"`
-        );
-      })
-      .catch((err) => {
-        console.error('[EmailTransport] Verification error:', err);
-      });
   });
 }
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -8,17 +8,13 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
-  Loader2,
-  Mail,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
 import {
   forgotPasswordSchema,
   loginSchema,
   registerSchema,
-  resendVerificationSchema,
   strongPasswordSchema,
 } from '../../lib/validations';
 import { Button } from '../ui/Button';
@@ -28,8 +24,7 @@ export type AuthRoute =
   | 'login'
   | 'register'
   | 'forgot-password'
-  | 'reset-password'
-  | 'verify-email';
+  | 'reset-password';
 
 interface AuthViewsProps {
   route: Exclude<AuthRoute, 'landing'>;
@@ -41,7 +36,6 @@ interface AuthViewsProps {
 type LoginFormValues = z.infer<typeof loginSchema>;
 type RegisterFormValues = z.infer<typeof registerSchema>;
 type ForgotFormValues = z.infer<typeof forgotPasswordSchema>;
-type ResendFormValues = z.infer<typeof resendVerificationSchema>;
 
 const resetFormSchema = z
   .object({
@@ -125,48 +119,6 @@ function PasswordInput({
   );
 }
 
-function EmailConfigBanner() {
-  return (
-    <div className="rounded-lg border border-amber-800/70 bg-amber-950/30 p-3.5 text-xs text-amber-200 space-y-1.5">
-      <div className="flex items-center gap-2 font-semibold text-amber-300">
-        <Mail className="h-3.5 w-3.5 shrink-0" />
-        <span>Email delivery is not configured</span>
-      </div>
-      <p className="text-amber-200/80 leading-relaxed">
-        No email provider credentials are configured in this environment. Set{' '}
-        <code className="font-mono text-[11px] bg-black/40 px-1 py-0.5 rounded">
-          SMTP_HOST
-        </code>
-        ,{' '}
-        <code className="font-mono text-[11px] bg-black/40 px-1 py-0.5 rounded">
-          SMTP_PORT
-        </code>
-        ,{' '}
-        <code className="font-mono text-[11px] bg-black/40 px-1 py-0.5 rounded">
-          SMTP_USER
-        </code>
-        ,{' '}
-        <code className="font-mono text-[11px] bg-black/40 px-1 py-0.5 rounded">
-          SMTP_PASS
-        </code>
-        , and{' '}
-        <code className="font-mono text-[11px] bg-black/40 px-1 py-0.5 rounded">
-          EMAIL_FROM
-        </code>{' '}
-        (or{' '}
-        <code className="font-mono text-[11px] bg-black/40 px-1 py-0.5 rounded">
-          RESEND_API_KEY
-        </code>{' '}
-        and{' '}
-        <code className="font-mono text-[11px] bg-black/40 px-1 py-0.5 rounded">
-          EMAIL_FROM
-        </code>
-        ) to enable outbound verification and reset emails.
-      </p>
-    </div>
-  );
-}
-
 export function AuthViews({
   route,
   initialToken,
@@ -174,12 +126,12 @@ export function AuthViews({
   onCompleteAuth,
 }: AuthViewsProps) {
   const {
-    profile,
     authConfig,
     loginWithEmail,
     registerWithEmail,
     signInWithGoogle,
-    refreshProfile,
+    requestPasswordReset,
+    confirmPasswordResetWithCode,
   } = useAuth();
   const { showToast } = useToast();
   const [googleLoading, setGoogleLoading] = useState(false);
@@ -257,27 +209,16 @@ export function AuthViews({
 
           {route === 'forgot-password' && (
             <ForgotPasswordCard
-              emailConfigured={authConfig.emailConfigured}
+              onRequestReset={requestPasswordReset}
               onNavigate={onNavigate}
             />
           )}
 
           {route === 'reset-password' && (
-            <ResetPasswordCard token={initialToken} onNavigate={onNavigate} />
-          )}
-
-          {route === 'verify-email' && (
-            <VerifyEmailCard
-              token={initialToken}
-              emailConfigured={authConfig.emailConfigured}
-              isSignedIn={Boolean(profile)}
-              onVerified={async () => {
-                if (profile) {
-                  await refreshProfile().catch(() => undefined);
-                }
-              }}
+            <ResetPasswordCard
+              oobCode={initialToken}
+              onConfirmReset={confirmPasswordResetWithCode}
               onNavigate={onNavigate}
-              onContinueWorkspace={onCompleteAuth}
             />
           )}
         </div>
@@ -437,7 +378,6 @@ function RegisterCard({
   onGoogleSignIn: () => Promise<void>;
   onRegister: (values: RegisterFormValues) => Promise<{
     requiresVerification: boolean;
-    emailConfigured: boolean;
     message: string;
   }>;
   onNavigate: (next: AuthRoute) => void;
@@ -610,10 +550,10 @@ function RegisterCard({
 }
 
 function ForgotPasswordCard({
-  emailConfigured,
+  onRequestReset,
   onNavigate,
 }: {
-  emailConfigured: boolean;
+  onRequestReset: (email: string) => Promise<string>;
   onNavigate: (next: AuthRoute) => void;
 }) {
   const [submitting, setSubmitting] = useState(false);
@@ -634,14 +574,8 @@ function ForgotPasswordCard({
     setErrorMsg(null);
     setSuccessMsg(null);
     try {
-      const res = await apiFetch<{ message: string; emailConfigured: boolean }>(
-        '/api/auth/forgot-password',
-        {
-          method: 'POST',
-          body: JSON.stringify(values),
-        }
-      );
-      setSuccessMsg(res.message);
+      const message = await onRequestReset(values.email);
+      setSuccessMsg(message);
     } catch (err) {
       setErrorMsg(
         err instanceof Error
@@ -660,11 +594,9 @@ function ForgotPasswordCard({
           Reset your password
         </h1>
         <p className="text-xs text-neutral-400 mt-1.5">
-          Enter your email address to receive a single-use password reset link.
+          Enter your email address and Firebase Authentication will send you a password reset link.
         </p>
       </div>
-
-      {!emailConfigured && <EmailConfigBanner />}
 
       {errorMsg && (
         <div
@@ -723,10 +655,12 @@ function ForgotPasswordCard({
 }
 
 function ResetPasswordCard({
-  token,
+  oobCode,
+  onConfirmReset,
   onNavigate,
 }: {
-  token?: string;
+  oobCode?: string;
+  onConfirmReset: (oobCode: string, newPassword: string) => Promise<void>;
   onNavigate: (next: AuthRoute) => void;
 }) {
   const [submitting, setSubmitting] = useState(false);
@@ -742,7 +676,7 @@ function ResetPasswordCard({
     defaultValues: { password: '', confirmPassword: '' },
   });
 
-  if (!token) {
+  if (!oobCode) {
     return (
       <div className="space-y-5 text-center">
         <AlertCircle className="h-9 w-9 text-amber-400 mx-auto" />
@@ -751,7 +685,7 @@ function ResetPasswordCard({
             Invalid reset link
           </h1>
           <p className="text-xs text-neutral-400 mt-2">
-            This password reset link is missing a valid token. Please request a new reset link.
+            This password reset link is missing a valid reset code. Please request a new reset link.
           </p>
         </div>
         <Button
@@ -773,7 +707,7 @@ function ResetPasswordCard({
             Password updated
           </h1>
           <p className="text-xs text-neutral-400 mt-2">
-            Your password has been changed and all previous sessions have been signed out.
+            Your password has been changed. You can now sign in with your new password.
           </p>
         </div>
         <Button onClick={() => onNavigate('login')} className="w-full h-10">
@@ -787,14 +721,7 @@ function ResetPasswordCard({
     setSubmitting(true);
     setErrorMsg(null);
     try {
-      await apiFetch('/api/auth/reset-password', {
-        method: 'POST',
-        body: JSON.stringify({
-          token,
-          password: values.password,
-          confirmPassword: values.confirmPassword,
-        }),
-      });
+      await onConfirmReset(oobCode, values.password);
       setCompleted(true);
     } catch (err) {
       setErrorMsg(
@@ -858,221 +785,6 @@ function ResetPasswordCard({
           Reset Password
         </Button>
       </form>
-    </div>
-  );
-}
-
-function VerifyEmailCard({
-  token,
-  emailConfigured,
-  isSignedIn,
-  onVerified,
-  onNavigate,
-  onContinueWorkspace,
-}: {
-  token?: string;
-  emailConfigured: boolean;
-  isSignedIn: boolean;
-  onVerified: () => Promise<void>;
-  onNavigate: (next: AuthRoute) => void;
-  onContinueWorkspace?: () => void;
-}) {
-  const [verifying, setVerifying] = useState(Boolean(token));
-  const [verifiedSuccess, setVerifiedSuccess] = useState(false);
-  const [verifyError, setVerifyError] = useState<string | null>(null);
-  const [resending, setResending] = useState(false);
-  const [resendMessage, setResendMessage] = useState<string | null>(null);
-  const [resendError, setResendError] = useState<string | null>(null);
-  const attemptedTokensRef = useRef<Set<string>>(new Set());
-
-  const {
-    register,
-    handleSubmit,
-    formState: { errors },
-  } = useForm<ResendFormValues>({
-    resolver: zodResolver(resendVerificationSchema),
-    defaultValues: { email: '' },
-  });
-
-  useEffect(() => {
-    if (!token || attemptedTokensRef.current.has(token)) return;
-    attemptedTokensRef.current.add(token);
-
-    let active = true;
-    (async () => {
-      setVerifying(true);
-      setVerifyError(null);
-      try {
-        await apiFetch('/api/auth/verify-email', {
-          method: 'POST',
-          body: JSON.stringify({ token }),
-        });
-        if (!active) return;
-        setVerifiedSuccess(true);
-        await onVerified();
-      } catch (err) {
-        if (!active) return;
-        setVerifyError(
-          err instanceof Error
-            ? err.message
-            : 'Unable to verify your email address.'
-        );
-      } finally {
-        if (active) setVerifying(false);
-      }
-    })();
-
-    return () => {
-      active = false;
-    };
-  }, [token, onVerified]);
-
-  const onResend = async (values: ResendFormValues) => {
-    setResending(true);
-    setResendMessage(null);
-    setResendError(null);
-    try {
-      const res = await apiFetch<{ message: string }>(
-        '/api/auth/resend-verification',
-        {
-          method: 'POST',
-          body: JSON.stringify(values),
-        }
-      );
-      setResendMessage(res.message);
-    } catch (err) {
-      setResendError(
-        err instanceof Error
-          ? err.message
-          : 'Unable to resend verification email.'
-      );
-    } finally {
-      setResending(false);
-    }
-  };
-
-  if (verifying) {
-    return (
-      <div className="py-8 text-center space-y-3">
-        <Loader2 className="h-8 w-8 animate-spin text-blue-500 mx-auto" />
-        <p className="text-sm text-neutral-300">Verifying your email address...</p>
-      </div>
-    );
-  }
-
-  if (verifiedSuccess) {
-    return (
-      <div className="space-y-5 text-center">
-        <CheckCircle2 className="h-10 w-10 text-emerald-400 mx-auto" />
-        <div>
-          <h1 className="font-display text-xl font-bold text-white">
-            Email verified
-          </h1>
-          <p className="text-xs text-neutral-400 mt-2">
-            Your email address has been verified. You can now continue to your DevTrack workspace.
-          </p>
-        </div>
-        {isSignedIn ? (
-          <Button
-            onClick={() => onContinueWorkspace?.()}
-            className="w-full h-10"
-          >
-            Continue to Dashboard
-          </Button>
-        ) : (
-          <Button onClick={() => onNavigate('login')} className="w-full h-10">
-            Sign in to DevTrack
-          </Button>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="font-display text-2xl font-bold tracking-tight text-white">
-          Email Verification
-        </h1>
-        <p className="text-xs text-neutral-400 mt-1.5">
-          Confirm your email address or request a fresh verification link.
-        </p>
-      </div>
-
-      {verifyError && (
-        <div
-          role="alert"
-          className="rounded-lg border border-red-900/70 bg-red-950/40 p-3 text-xs text-red-300 flex items-start gap-2"
-        >
-          <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
-          <span>{verifyError}</span>
-        </div>
-      )}
-
-      {!emailConfigured && <EmailConfigBanner />}
-
-      {resendError && (
-        <div
-          role="alert"
-          className="rounded-lg border border-red-900/70 bg-red-950/40 p-3 text-xs text-red-300 flex items-start gap-2"
-        >
-          <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
-          <span>{resendError}</span>
-        </div>
-      )}
-
-      {resendMessage && (
-        <div className="rounded-lg border border-emerald-900/70 bg-emerald-950/40 p-3 text-xs text-emerald-300 flex items-start gap-2">
-          <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
-          <span>{resendMessage}</span>
-        </div>
-      )}
-
-      <form onSubmit={handleSubmit(onResend)} className="space-y-4">
-        <div>
-          <label
-            htmlFor="verify-email-input"
-            className="block text-xs font-medium text-neutral-300 mb-1.5"
-          >
-            Email Address
-          </label>
-          <input
-            id="verify-email-input"
-            type="email"
-            autoComplete="email"
-            placeholder="you@company.com"
-            {...register('email')}
-            className="w-full h-10 rounded-md border border-neutral-800 bg-[#0D0F14] px-3 text-sm text-neutral-100 placeholder:text-neutral-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          {errors.email && (
-            <p className="text-xs text-red-400 mt-1">{errors.email.message}</p>
-          )}
-        </div>
-
-        <Button type="submit" className="w-full h-10" loading={resending}>
-          Resend Verification Email
-        </Button>
-      </form>
-
-      <div className="text-center">
-        {isSignedIn ? (
-          <button
-            type="button"
-            onClick={() => onContinueWorkspace?.()}
-            className="text-xs text-blue-400 hover:underline cursor-pointer"
-          >
-            Continue to Dashboard
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => onNavigate('login')}
-            className="text-xs text-blue-400 hover:underline cursor-pointer"
-          >
-            Back to sign in
-          </button>
-        )}
-      </div>
     </div>
   );
 }

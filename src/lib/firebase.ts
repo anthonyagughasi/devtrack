@@ -1,92 +1,44 @@
-import { initializeApp, getApps } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
+import { getApp, getApps, initializeApp, type FirebaseOptions } from 'firebase/app';
 import {
-  doc,
-  getDocFromServer,
-  getFirestore,
-  serverTimestamp,
-  setDoc,
-} from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+  browserLocalPersistence,
+  getAuth,
+  GoogleAuthProvider,
+  setPersistence,
+} from 'firebase/auth';
+import appletFirebaseConfig from '../../firebase-applet-config.json';
 
-const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
+function readEnv(key: string): string | undefined {
+  const env = import.meta.env as Record<string, string | undefined>;
+  const value = env[key]?.trim();
+  return value || undefined;
+}
+
+export const firebaseClientConfig: FirebaseOptions = {
+  apiKey: readEnv('VITE_FIREBASE_API_KEY') ?? appletFirebaseConfig.apiKey,
+  authDomain: readEnv('VITE_FIREBASE_AUTH_DOMAIN') ?? appletFirebaseConfig.authDomain,
+  projectId: readEnv('VITE_FIREBASE_PROJECT_ID') ?? appletFirebaseConfig.projectId,
+  storageBucket:
+    readEnv('VITE_FIREBASE_STORAGE_BUCKET') ?? appletFirebaseConfig.storageBucket,
+  messagingSenderId:
+    readEnv('VITE_FIREBASE_MESSAGING_SENDER_ID') ?? appletFirebaseConfig.messagingSenderId,
+  appId: readEnv('VITE_FIREBASE_APP_ID') ?? appletFirebaseConfig.appId,
+};
+
+export function isFirebaseClientConfigured(): boolean {
+  return Boolean(
+    firebaseClientConfig.apiKey &&
+      firebaseClientConfig.authDomain &&
+      firebaseClientConfig.projectId &&
+      firebaseClientConfig.appId
+  );
+}
+
+const app = getApps().length ? getApp() : initializeApp(firebaseClientConfig);
+
 export const auth = getAuth(app);
-export const firestoreDb = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+if (typeof window !== 'undefined') {
+  void setPersistence(auth, browserLocalPersistence).catch(() => undefined);
+}
+
 export const googleAuthProvider = new GoogleAuthProvider();
 googleAuthProvider.setCustomParameters({ prompt: 'select_account' });
-
-export enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-export interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId?: string | null;
-    email?: string | null;
-    emailVerified?: boolean | null;
-    isAnonymous?: boolean | null;
-    tenantId?: string | null;
-    providerInfo?: {
-      providerId?: string | null;
-      email?: string | null;
-    }[];
-  };
-}
-
-export function handleFirestoreError(
-  error: unknown,
-  operationType: OperationType,
-  path: string | null
-): never {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo:
-        auth.currentUser?.providerData?.map((provider) => ({
-          providerId: provider.providerId,
-          email: provider.email,
-        })) || [],
-    },
-    operationType,
-    path,
-  };
-  console.error('Firestore Error:', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
-
-export async function testFirestoreConnection(): Promise<void> {
-  try {
-    await getDocFromServer(doc(firestoreDb, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
-    }
-  }
-}
-
-export async function recordUserFirestoreSync(uid: string): Promise<void> {
-  const path = `user_sync/${uid}`;
-  try {
-    await setDoc(doc(firestoreDb, 'user_sync', uid), {
-      uid,
-      status: 'connected',
-      updatedAt: serverTimestamp(),
-    });
-    await getDocFromServer(doc(firestoreDb, 'user_sync', uid));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-  }
-}

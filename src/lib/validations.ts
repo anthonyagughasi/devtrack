@@ -127,14 +127,6 @@ export const resetPasswordSchema = z
     path: ['confirmPassword'],
   });
 
-export const verifyEmailSchema = z.object({
-  token: z.string().trim().min(16, 'Verification token is invalid'),
-});
-
-export const resendVerificationSchema = z.object({
-  email: z.string().trim().email('Valid email address is required').toLowerCase(),
-});
-
 export const changePasswordSchema = z
   .object({
     currentPassword: z.string().optional().default(''),
