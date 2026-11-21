@@ -3,6 +3,7 @@
   "appId": "1:585554483367:web:9f176af4b70a7410b1a382",
   "apiKey": "AIzaSyALoDE5th1p03l9RBimh-rX-TTmm0SLhVs",
   "authDomain": "spatial-campaign-nlvvl.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-4e7b9940-78ae-415f-b5d7-c78ccb48710d",
   "storageBucket": "spatial-campaign-nlvvl.firebasestorage.app",
   "messagingSenderId": "585554483367",
   "measurementId": "",

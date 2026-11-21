@@ -1,0 +1,35 @@
+{
+  "entities": {
+    "UserSync": {
+      "title": "UserSync",
+      "description": "Per-user workspace Firestore connectivity and sync state record stored in DevTrack's dedicated Firestore database.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Authenticated Firebase user UID matching the document ID.",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["connected", "active"],
+          "maxLength": 32
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "status", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/user_sync/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserSync"
+      },
+      "description": "Per-user connectivity and sync status documents strictly isolated to the owning verified user."
+    }
+  }
+}

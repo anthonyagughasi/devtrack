@@ -12,7 +12,12 @@ import {
   signOut as firebaseSignOut,
   type User as FirebaseUser,
 } from 'firebase/auth';
-import { auth, googleAuthProvider } from '../lib/firebase';
+import {
+  auth,
+  googleAuthProvider,
+  recordUserFirestoreSync,
+  testFirestoreConnection,
+} from '../lib/firebase';
 import { ApiError, apiFetch } from '../lib/api';
 import type { UserProfile } from '../types/app';
 
@@ -124,6 +129,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     init();
+    void testFirestoreConnection();
 
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!active) return;
@@ -175,6 +181,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setProfile(data.user);
       applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
       setAuthError(null);
+      if (cred.user.emailVerified) {
+        void recordUserFirestoreSync(cred.user.uid).catch(() => undefined);
+      }
     } catch (err: unknown) {
       const msg =
         err instanceof Error
