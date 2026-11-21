@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { ApiError, apiFetch } from '../../lib/api';
+import { apiFetch } from '../../lib/api';
 import {
   forgotPasswordSchema,
   loginSchema,
@@ -247,15 +247,8 @@ export function AuthViews({
               onGoogleSignIn={handleGoogleSignIn}
               onRegister={async (values) => {
                 const res = await registerWithEmail(values);
-                if (!res.requiresVerification) {
-                  showToast(
-                    res.emailConfigured
-                      ? 'Account created and signed in.'
-                      : 'Account created and signed in (email delivery is not configured in this environment).',
-                    'success'
-                  );
-                  onCompleteAuth?.();
-                }
+                showToast('Account created and signed in.', 'success');
+                onCompleteAuth?.();
                 return res;
               }}
               onNavigate={onNavigate}
@@ -308,7 +301,6 @@ function LoginCard({
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
-  const [needsVerification, setNeedsVerification] = useState(false);
 
   const {
     register,
@@ -322,16 +314,12 @@ function LoginCard({
   const onSubmit = async (values: LoginFormValues) => {
     setSubmitting(true);
     setServerError(null);
-    setNeedsVerification(false);
     try {
       await onLogin(values.email, values.password);
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : 'Unable to sign in right now.';
       setServerError(msg);
-      if (err instanceof ApiError && err.status === 403) {
-        setNeedsVerification(true);
-      }
     } finally {
       setSubmitting(false);
     }
@@ -351,21 +339,10 @@ function LoginCard({
       {serverError && (
         <div
           role="alert"
-          className="rounded-lg border border-red-900/70 bg-red-950/40 p-3 text-xs text-red-300 space-y-1.5"
+          className="rounded-lg border border-red-900/70 bg-red-950/40 p-3 text-xs text-red-300 flex items-start gap-2"
         >
-          <div className="flex items-start gap-2">
-            <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
-            <span>{serverError}</span>
-          </div>
-          {needsVerification && (
-            <button
-              type="button"
-              onClick={() => onNavigate('verify-email')}
-              className="text-blue-400 hover:underline font-medium cursor-pointer block pl-6"
-            >
-              Resend verification email
-            </button>
-          )}
+          <AlertCircle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+          <span>{serverError}</span>
         </div>
       )}
 
@@ -467,9 +444,6 @@ function RegisterCard({
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
-  const [verificationSentMsg, setVerificationSentMsg] = useState<string | null>(
-    null
-  );
 
   const {
     register,
@@ -487,10 +461,7 @@ function RegisterCard({
     setSubmitting(true);
     setServerError(null);
     try {
-      const res = await onRegister(values);
-      if (res.requiresVerification) {
-        setVerificationSentMsg(res.message);
-      }
+      await onRegister(values);
     } catch (err) {
       setServerError(
         err instanceof Error ? err.message : 'Unable to create account.'
@@ -499,36 +470,6 @@ function RegisterCard({
       setSubmitting(false);
     }
   };
-
-  if (verificationSentMsg) {
-    return (
-      <div className="space-y-5 text-center">
-        <div className="h-11 w-11 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mx-auto">
-          <Mail className="h-5 w-5 text-emerald-400" />
-        </div>
-        <div>
-          <h1 className="font-display text-xl font-bold text-white">
-            Verify your email
-          </h1>
-          <p className="text-xs text-neutral-400 mt-2 leading-relaxed">
-            {verificationSentMsg}
-          </p>
-        </div>
-        <div className="flex flex-col gap-2.5 pt-2">
-          <Button onClick={() => onNavigate('login')} className="w-full h-10">
-            Go to sign in
-          </Button>
-          <button
-            type="button"
-            onClick={() => onNavigate('verify-email')}
-            className="text-xs text-blue-400 hover:underline cursor-pointer"
-          >
-            Need to resend the verification email?
-          </button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-6">

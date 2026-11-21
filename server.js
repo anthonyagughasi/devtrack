@@ -1275,11 +1275,8 @@ async function listProjectInvitations(projectId, userId) {
     throw new AppError(500, "Failed to load invitations.", { cause: error });
   }
 }
-async function listIncomingInvitations(userEmail, emailVerified) {
+async function listIncomingInvitations(userEmail) {
   try {
-    if (!emailVerified) {
-      return [];
-    }
     const cleanEmail = userEmail.trim().toLowerCase();
     return await db.select({
       id: invitations.id,
@@ -1317,8 +1314,7 @@ async function inviteMember(projectId, actorUserId, input) {
     const [existingUser] = await db.select({
       id: users.id,
       email: users.email,
-      name: users.name,
-      emailVerifiedAt: users.emailVerifiedAt
+      name: users.name
     }).from(users).where(eq4(users.email, cleanEmail)).limit(1);
     if (existingUser) {
       const [alreadyMember] = await db.select({ id: projectMembers.id }).from(projectMembers).where(
@@ -1364,7 +1360,7 @@ async function inviteMember(projectId, actorUserId, input) {
         resourceName: cleanEmail,
         details: `Invited ${cleanEmail} as ${input.role}`
       });
-      if (existingUser && existingUser.emailVerifiedAt) {
+      if (existingUser) {
         await createNotification(tx, {
           userId: existingUser.id,
           type: "PROJECT_INVITATION",
@@ -1385,10 +1381,9 @@ async function syncPendingInvitationNotificationsForUser(executor, userId) {
   const [user] = await executor.select({
     id: users.id,
     email: users.email,
-    emailVerifiedAt: users.emailVerifiedAt,
     notifyOnInvite: users.notifyOnInvite
   }).from(users).where(eq4(users.id, userId)).limit(1);
-  if (!user || !user.emailVerifiedAt || !user.notifyOnInvite) {
+  if (!user || !user.notifyOnInvite) {
     return;
   }
   const cleanEmail = user.email.trim().toLowerCase();
@@ -1424,14 +1419,8 @@ async function syncPendingInvitationNotificationsForUser(executor, userId) {
     }
   }
 }
-async function acceptInvitation(token, userId, userEmail, emailVerified) {
+async function acceptInvitation(token, userId, userEmail) {
   try {
-    if (!emailVerified) {
-      throw new AppError(
-        403,
-        "Please verify your email address before accepting project invitations."
-      );
-    }
     return await db.transaction(async (tx) => {
       const [invite] = await tx.select().from(invitations).where(eq4(invitations.token, token.trim())).limit(1);
       if (!invite) {
@@ -1481,14 +1470,8 @@ async function acceptInvitation(token, userId, userEmail, emailVerified) {
     throw new AppError(500, "Failed to accept invitation.", { cause: error });
   }
 }
-async function declineInvitation(token, userId, userEmail, emailVerified) {
+async function declineInvitation(token, userId, userEmail) {
   try {
-    if (!emailVerified) {
-      throw new AppError(
-        403,
-        "Please verify your email address before responding to project invitations."
-      );
-    }
     return await db.transaction(async (tx) => {
       const [invite] = await tx.select().from(invitations).where(eq4(invitations.token, token.trim())).limit(1);
       if (!invite) {
@@ -1745,7 +1728,7 @@ async function verifyPassword(plain, hash) {
   return bcrypt.compare(plain, hash);
 }
 function isEmailVerificationEnforced() {
-  return isEmailProviderConfigured() || process.env.REQUIRE_EMAIL_VERIFICATION === "true";
+  return false;
 }
 async function createSessionRecord(userId, userAgent) {
   try {
@@ -1792,9 +1775,6 @@ async function registerWithEmail(input) {
       throw new AppError(409, "An account with this email address already exists.");
     }
     const passwordHash = await hashPassword(input.password);
-    const rawVerifyToken = generateSecureToken();
-    const verifyTokenHash = hashToken(rawVerifyToken);
-    const verifyExpiresAt = new Date(Date.now() + VERIFY_TOKEN_TTL_MS);
     const createdUser = await db.transaction(async (tx) => {
       const [inserted] = await tx.insert(users).values({
         uid: `local_${crypto2.randomUUID()}`,
@@ -1803,37 +1783,16 @@ async function registerWithEmail(input) {
         passwordHash,
         emailVerifiedAt: null
       }).returning();
-      await tx.insert(emailVerificationTokens).values({
-        userId: inserted.id,
-        tokenHash: verifyTokenHash,
-        expiresAt: verifyExpiresAt
-      });
+      await syncPendingInvitationNotificationsForUser(tx, inserted.id);
       return inserted;
     });
-    const emailConfigured = isEmailProviderConfigured();
-    if (emailConfigured) {
-      const verifyUrl = `${input.baseUrl}/verify-email?token=${rawVerifyToken}`;
-      try {
-        await sendVerificationEmail(cleanEmail, createdUser.name, verifyUrl);
-      } catch (emailErr) {
-        await db.delete(users).where(eq6(users.id, createdUser.id)).catch(() => void 0);
-        throw emailErr;
-      }
-      return {
-        user: sanitizeUser(createdUser),
-        requiresVerification: true,
-        emailConfigured: true,
-        sessionToken: null,
-        message: "Account created. Check your inbox for a verification link before signing in."
-      };
-    }
-    const sessionToken = isEmailVerificationEnforced() ? null : await createSessionRecord(createdUser.id, input.userAgent);
+    const sessionToken = await createSessionRecord(createdUser.id, input.userAgent);
     return {
       user: sanitizeUser(createdUser),
-      requiresVerification: isEmailVerificationEnforced(),
-      emailConfigured: false,
+      requiresVerification: false,
+      emailConfigured: isEmailProviderConfigured(),
       sessionToken,
-      message: `Account created. ${getMissingEmailConfigMessage()}`
+      message: "Account created successfully."
     };
   } catch (error) {
     if (error instanceof AppError) throw error;
@@ -1852,12 +1811,7 @@ async function loginWithEmail(input) {
     if (!matches) {
       throw new AppError(401, "Invalid email address or password.");
     }
-    if (isEmailVerificationEnforced() && !user.emailVerifiedAt) {
-      throw new AppError(
-        403,
-        "Please verify your email address before signing in."
-      );
-    }
+    await syncPendingInvitationNotificationsForUser(db, user.id);
     const sessionToken = await createSessionRecord(user.id, input.userAgent);
     return {
       user: sanitizeUser(user),
@@ -1885,9 +1839,7 @@ async function authenticateWithGoogleToken(decoded, userAgent) {
       provider: "google",
       providerAccountId: decoded.uid
     }).onConflictDoNothing();
-    if (user.emailVerified) {
-      await syncPendingInvitationNotificationsForUser(db, user.id);
-    }
+    await syncPendingInvitationNotificationsForUser(db, user.id);
     const sessionToken = await createSessionRecord(user.id, userAgent);
     return { user, sessionToken };
   } catch (error) {
@@ -3703,10 +3655,7 @@ app.get(
   "/api/invitations/mine",
   requireAuth,
   asyncHandler(async (req, res) => {
-    const items = await listIncomingInvitations(
-      req.dbUser.email,
-      req.dbUser.emailVerified
-    );
+    const items = await listIncomingInvitations(req.dbUser.email);
     res.json({ invitations: items });
   })
 );
@@ -3718,8 +3667,7 @@ app.post(
     const result = await acceptInvitation(
       parsed.token,
       req.dbUser.id,
-      req.dbUser.email,
-      req.dbUser.emailVerified
+      req.dbUser.email
     );
     res.json(result);
   })
@@ -3732,8 +3680,7 @@ app.post(
     const result = await declineInvitation(
       parsed.token,
       req.dbUser.id,
-      req.dbUser.email,
-      req.dbUser.emailVerified
+      req.dbUser.email
     );
     res.json(result);
   })

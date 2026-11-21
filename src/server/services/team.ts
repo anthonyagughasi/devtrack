@@ -191,14 +191,8 @@ export async function listProjectInvitations(projectId: number, userId: number) 
   }
 }
 
-export async function listIncomingInvitations(
-  userEmail: string,
-  emailVerified: boolean
-) {
+export async function listIncomingInvitations(userEmail: string) {
   try {
-    if (!emailVerified) {
-      return [];
-    }
     const cleanEmail = userEmail.trim().toLowerCase();
     return await db
       .select({
@@ -251,7 +245,6 @@ export async function inviteMember(
         id: users.id,
         email: users.email,
         name: users.name,
-        emailVerifiedAt: users.emailVerifiedAt,
       })
       .from(users)
       .where(eq(users.email, cleanEmail))
@@ -324,7 +317,7 @@ export async function inviteMember(
         details: `Invited ${cleanEmail} as ${input.role}`,
       });
 
-      if (existingUser && existingUser.emailVerifiedAt) {
+      if (existingUser) {
         await createNotification(tx, {
           userId: existingUser.id,
           type: 'PROJECT_INVITATION',
@@ -351,14 +344,13 @@ export async function syncPendingInvitationNotificationsForUser(
     .select({
       id: users.id,
       email: users.email,
-      emailVerifiedAt: users.emailVerifiedAt,
       notifyOnInvite: users.notifyOnInvite,
     })
     .from(users)
     .where(eq(users.id, userId))
     .limit(1);
 
-  if (!user || !user.emailVerifiedAt || !user.notifyOnInvite) {
+  if (!user || !user.notifyOnInvite) {
     return;
   }
 
@@ -409,17 +401,9 @@ export async function syncPendingInvitationNotificationsForUser(
 export async function acceptInvitation(
   token: string,
   userId: number,
-  userEmail: string,
-  emailVerified: boolean
+  userEmail: string
 ) {
   try {
-    if (!emailVerified) {
-      throw new AppError(
-        403,
-        'Please verify your email address before accepting project invitations.'
-      );
-    }
-
     return await db.transaction(async (tx) => {
       const [invite] = await tx
         .select()
@@ -499,17 +483,9 @@ export async function acceptInvitation(
 export async function declineInvitation(
   token: string,
   userId: number,
-  userEmail: string,
-  emailVerified: boolean
+  userEmail: string
 ) {
   try {
-    if (!emailVerified) {
-      throw new AppError(
-        403,
-        'Please verify your email address before responding to project invitations.'
-      );
-    }
-
     return await db.transaction(async (tx) => {
       const [invite] = await tx
         .select()

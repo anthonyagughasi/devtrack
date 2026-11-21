@@ -152,6 +152,7 @@ describe('DevTrack Authentication Workflows (Live Cloud SQL PostgreSQL)', () => 
     expect(res.user.email).toBe(email.toLowerCase());
     expect(res.user.hasPassword).toBe(true);
     expect('passwordHash' in res.user).toBe(false);
+    expect(res.requiresVerification).toBe(false);
     expect(res.sessionToken).toBeTruthy();
     activeSessionToken = res.sessionToken!;
 
@@ -165,7 +166,7 @@ describe('DevTrack Authentication Workflows (Live Cloud SQL PostgreSQL)', () => 
       .select()
       .from(emailVerificationTokens)
       .where(eq(emailVerificationTokens.userId, userId));
-    expect(verifyRows.length).toBe(1);
+    expect(verifyRows.length).toBe(0);
   });
 
   it('2. rejects duplicate email registration with 409', async () => {
@@ -284,14 +285,15 @@ describe('DevTrack Authentication Workflows (Live Cloud SQL PostgreSQL)', () => 
     expect(relogin.user.id).toBe(userId);
   });
 
-  it('10. verifies email with valid token, rejects reuse and expired tokens, and enforces when enabled', async () => {
-    // Confirm unverified user is blocked when REQUIRE_EMAIL_VERIFICATION=true
+  it('10. does not block login for unverified email and still supports verifyEmailWithToken', async () => {
+    // Even if REQUIRE_EMAIL_VERIFICATION=true is set, unverified email/password accounts can sign in directly
     const prevFlag = process.env.REQUIRE_EMAIL_VERIFICATION;
     process.env.REQUIRE_EMAIL_VERIFICATION = 'true';
     try {
-      await expect(
-        loginWithEmail({ email, password: newPassword })
-      ).rejects.toMatchObject({ statusCode: 403 });
+      const directLogin = await loginWithEmail({ email, password: newPassword });
+      expect(directLogin.user.id).toBe(userId);
+      expect(directLogin.sessionToken).toBeTruthy();
+      await deleteSessionByToken(directLogin.sessionToken);
     } finally {
       if (prevFlag === undefined) {
         delete process.env.REQUIRE_EMAIL_VERIFICATION;

@@ -600,10 +600,7 @@ app.get(
   '/api/invitations/mine',
   requireAuth,
   asyncHandler(async (req, res) => {
-    const items = await listIncomingInvitations(
-      req.dbUser!.email,
-      req.dbUser!.emailVerified
-    );
+    const items = await listIncomingInvitations(req.dbUser!.email);
     res.json({ invitations: items });
   })
 );
@@ -616,8 +613,7 @@ app.post(
     const result = await acceptInvitation(
       parsed.token,
       req.dbUser!.id,
-      req.dbUser!.email,
-      req.dbUser!.emailVerified
+      req.dbUser!.email
     );
     res.json(result);
   })
@@ -631,8 +627,7 @@ app.post(
     const result = await declineInvitation(
       parsed.token,
       req.dbUser!.id,
-      req.dbUser!.email,
-      req.dbUser!.emailVerified
+      req.dbUser!.email
     );
     res.json(result);
   })

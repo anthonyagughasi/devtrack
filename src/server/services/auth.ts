@@ -44,7 +44,7 @@ export async function verifyPassword(plain: string, hash: string): Promise<boole
 }
 
 export function isEmailVerificationEnforced(): boolean {
-  return isEmailProviderConfigured() || process.env.REQUIRE_EMAIL_VERIFICATION === 'true';
+  return false;
 }
 
 export async function createSessionRecord(
@@ -120,9 +120,6 @@ export async function registerWithEmail(input: {
     }
 
     const passwordHash = await hashPassword(input.password);
-    const rawVerifyToken = generateSecureToken();
-    const verifyTokenHash = hashToken(rawVerifyToken);
-    const verifyExpiresAt = new Date(Date.now() + VERIFY_TOKEN_TTL_MS);
 
     const createdUser = await db.transaction(async (tx) => {
       const [inserted] = await tx
@@ -136,45 +133,19 @@ export async function registerWithEmail(input: {
         })
         .returning();
 
-      await tx.insert(emailVerificationTokens).values({
-        userId: inserted.id,
-        tokenHash: verifyTokenHash,
-        expiresAt: verifyExpiresAt,
-      });
+      await syncPendingInvitationNotificationsForUser(tx, inserted.id);
 
       return inserted;
     });
 
-    const emailConfigured = isEmailProviderConfigured();
-    if (emailConfigured) {
-      const verifyUrl = `${input.baseUrl}/verify-email?token=${rawVerifyToken}`;
-      try {
-        await sendVerificationEmail(cleanEmail, createdUser.name, verifyUrl);
-      } catch (emailErr) {
-        // Do not leave a stranded unverified account if initial verification email fails to deliver
-        await db.delete(users).where(eq(users.id, createdUser.id)).catch(() => undefined);
-        throw emailErr;
-      }
-      return {
-        user: sanitizeUser(createdUser),
-        requiresVerification: true,
-        emailConfigured: true,
-        sessionToken: null as string | null,
-        message: 'Account created. Check your inbox for a verification link before signing in.',
-      };
-    }
-
-    // Email provider is not configured — do not claim an email was sent.
-    const sessionToken = isEmailVerificationEnforced()
-      ? null
-      : await createSessionRecord(createdUser.id, input.userAgent);
+    const sessionToken = await createSessionRecord(createdUser.id, input.userAgent);
 
     return {
       user: sanitizeUser(createdUser),
-      requiresVerification: isEmailVerificationEnforced(),
-      emailConfigured: false,
+      requiresVerification: false,
+      emailConfigured: isEmailProviderConfigured(),
       sessionToken,
-      message: `Account created. ${getMissingEmailConfigMessage()}`,
+      message: 'Account created successfully.',
     };
   } catch (error) {
     if (error instanceof AppError) throw error;
@@ -205,12 +176,7 @@ export async function loginWithEmail(input: {
       throw new AppError(401, 'Invalid email address or password.');
     }
 
-    if (isEmailVerificationEnforced() && !user.emailVerifiedAt) {
-      throw new AppError(
-        403,
-        'Please verify your email address before signing in.'
-      );
-    }
+    await syncPendingInvitationNotificationsForUser(db, user.id);
 
     const sessionToken = await createSessionRecord(user.id, input.userAgent);
     return {
@@ -248,9 +214,7 @@ export async function authenticateWithGoogleToken(
       })
       .onConflictDoNothing();
 
-    if (user.emailVerified) {
-      await syncPendingInvitationNotificationsForUser(db, user.id);
-    }
+    await syncPendingInvitationNotificationsForUser(db, user.id);
 
     const sessionToken = await createSessionRecord(user.id, userAgent);
     return { user, sessionToken };

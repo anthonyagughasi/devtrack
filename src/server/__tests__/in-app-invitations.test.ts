@@ -3,9 +3,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { and, eq, inArray } from 'drizzle-orm';
 import { db } from '../../db/index.ts';
 import {
-  emailVerificationTokens,
   invitations,
-  notifications,
   projectMembers,
   projects,
   users,
@@ -13,12 +11,9 @@ import {
 import {
   createSessionRecord,
   deleteSessionByToken,
-  generateSecureToken,
   getUserBySessionToken,
-  hashToken,
   loginWithEmail,
   registerWithEmail,
-  verifyEmailWithToken,
 } from '../services/auth.ts';
 import { getUserNotifications } from '../services/notifications.ts';
 import { createProject } from '../services/projects.ts';
@@ -63,7 +58,7 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
   let revokedInviteId = 0;
   let revokedInviteToken = '';
 
-  it('sets up verified owner, existing registered user, unrelated user, and a project', async () => {
+  it('sets up owner, existing registered user, unrelated user, and a project via direct registration', async () => {
     const [ownerRes, existingRes, unrelatedRes] = await Promise.all([
       registerWithEmail({
         name: 'Project Owner',
@@ -90,15 +85,10 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
     unrelatedUserId = unrelatedRes.user.id;
     createdUserIds.push(ownerId, existingUserId, unrelatedUserId);
 
-    for (const uid of [ownerId, existingUserId, unrelatedUserId]) {
-      const token = generateSecureToken();
-      await db.insert(emailVerificationTokens).values({
-        userId: uid,
-        tokenHash: hashToken(token),
-        expiresAt: new Date(Date.now() + 3600_000),
-      });
-      await verifyEmailWithToken(token);
-      if (ownerRes.sessionToken) await deleteSessionByToken(ownerRes.sessionToken);
+    for (const res of [ownerRes, existingRes, unrelatedRes]) {
+      expect(res.requiresVerification).toBe(false);
+      expect(res.sessionToken).toBeTruthy();
+      if (res.sessionToken) await deleteSessionByToken(res.sessionToken);
     }
 
     const project = await createProject(ownerId, {
@@ -135,7 +125,7 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 
-  it('3 & 4 & 5 & 6. new account must verify email before seeing/accepting pending invitation, then accepts and gets membership', async () => {
+  it('3 & 4 & 5 & 6. newly registered account sees pending invitation via normalized email without auto-join, then accepts explicitly', async () => {
     const regRes = await registerWithEmail({
       name: 'New Collaborator',
       email: normalizedUnregistered,
@@ -144,37 +134,22 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
     });
     newUserId = regRes.user.id;
     createdUserIds.push(newUserId);
+    expect(regRes.requiresVerification).toBe(false);
+    expect(regRes.sessionToken).toBeTruthy();
     if (regRes.sessionToken) await deleteSessionByToken(regRes.sessionToken);
 
-    // Before email verification: cannot see pending invitations or accept them
-    const unverifiedIncoming = await listIncomingInvitations(normalizedUnregistered, false);
-    expect(unverifiedIncoming).toEqual([]);
-
-    await expect(
-      acceptInvitation(unregisteredInviteToken, newUserId, normalizedUnregistered, false)
-    ).rejects.toMatchObject({ statusCode: 403 });
-
-    // Confirm no project membership granted yet
+    // Confirm no project membership is automatically granted upon registration
     const preMembers = await db
       .select()
       .from(projectMembers)
       .where(and(eq(projectMembers.projectId, projectId), eq(projectMembers.userId, newUserId)));
     expect(preMembers.length).toBe(0);
 
-    // Verify email address
-    const verifyRaw = generateSecureToken();
-    await db.insert(emailVerificationTokens).values({
-      userId: newUserId,
-      tokenHash: hashToken(verifyRaw),
-      expiresAt: new Date(Date.now() + 3600_000),
-    });
-    await verifyEmailWithToken(verifyRaw);
-
-    // Pending invitation & notification appear automatically once verified
-    const verifiedIncoming = await listIncomingInvitations(normalizedUnregistered, true);
-    expect(verifiedIncoming.length).toBe(1);
-    expect(verifiedIncoming[0].token).toBe(unregisteredInviteToken);
-    expect(verifiedIncoming[0].role).toBe('ADMINISTRATOR');
+    // Pending invitation & notification appear immediately using normalized email
+    const incoming = await listIncomingInvitations(normalizedUnregistered);
+    expect(incoming.length).toBe(1);
+    expect(incoming[0].token).toBe(unregisteredInviteToken);
+    expect(incoming[0].role).toBe('ADMINISTRATOR');
 
     const notifData = await getUserNotifications(newUserId);
     expect(
@@ -187,8 +162,7 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
     const accepted = await acceptInvitation(
       unregisteredInviteToken,
       newUserId,
-      normalizedUnregistered,
-      true
+      normalizedUnregistered
     );
     expect(accepted.projectId).toBe(projectId);
     expect(accepted.invitation.status).toBe('ACCEPTED');
@@ -202,7 +176,7 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
 
     // Accepting again fails cleanly without duplicate membership
     await expect(
-      acceptInvitation(unregisteredInviteToken, newUserId, normalizedUnregistered, true)
+      acceptInvitation(unregisteredInviteToken, newUserId, normalizedUnregistered)
     ).rejects.toMatchObject({ statusCode: 400 });
   });
 
@@ -215,13 +189,13 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
 
     // Login, check invitations, logout, login again -> still present
     const login1 = await loginWithEmail({ email: existingEmail, password });
-    expect((await getUserBySessionToken(login1.sessionToken))?.emailVerified).toBe(true);
-    const list1 = await listIncomingInvitations(login1.user.email, login1.user.emailVerified);
+    expect((await getUserBySessionToken(login1.sessionToken))?.id).toBe(existingUserId);
+    const list1 = await listIncomingInvitations(login1.user.email);
     expect(list1.some((i) => i.token === existingInviteToken)).toBe(true);
     await deleteSessionByToken(login1.sessionToken);
 
     const login2 = await loginWithEmail({ email: existingEmail, password });
-    const list2 = await listIncomingInvitations(login2.user.email, login2.user.emailVerified);
+    const list2 = await listIncomingInvitations(login2.user.email);
     expect(list2.some((i) => i.token === existingInviteToken)).toBe(true);
 
     const notifs = await getUserNotifications(existingUserId);
@@ -235,15 +209,15 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
   });
 
   it('10. prevents an unrelated account from seeing or accepting another user invitation', async () => {
-    const unrelatedIncoming = await listIncomingInvitations(unrelatedEmail, true);
+    const unrelatedIncoming = await listIncomingInvitations(unrelatedEmail);
     expect(unrelatedIncoming.some((i) => i.token === existingInviteToken)).toBe(false);
 
     await expect(
-      acceptInvitation(existingInviteToken, unrelatedUserId, unrelatedEmail, true)
+      acceptInvitation(existingInviteToken, unrelatedUserId, unrelatedEmail)
     ).rejects.toMatchObject({ statusCode: 403 });
 
     await expect(
-      declineInvitation(existingInviteToken, unrelatedUserId, unrelatedEmail, true)
+      declineInvitation(existingInviteToken, unrelatedUserId, unrelatedEmail)
     ).rejects.toMatchObject({ statusCode: 403 });
   });
 
@@ -252,8 +226,7 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
     const declined = await declineInvitation(
       declineInviteToken,
       existingUserId,
-      existingEmail,
-      true
+      existingEmail
     );
     expect(declined.invitation.status).toBe('DECLINED');
 
@@ -265,7 +238,7 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
       );
     expect(members.length).toBe(0);
 
-    const incomingAfter = await listIncomingInvitations(existingEmail, true);
+    const incomingAfter = await listIncomingInvitations(existingEmail);
     expect(incomingAfter.some((i) => i.token === declineInviteToken)).toBe(false);
   });
 
@@ -280,7 +253,7 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
     await revokeInvitation(revokedInviteId, ownerId);
 
     await expect(
-      acceptInvitation(revokedInviteToken, existingUserId, existingEmail, true)
+      acceptInvitation(revokedInviteToken, existingUserId, existingEmail)
     ).rejects.toMatchObject({ statusCode: 400 });
 
     // Expired invitation
@@ -294,9 +267,9 @@ describe('DevTrack Email-Based In-App Project Invitations (Live Cloud SQL Postgr
       .set({ expiresAt: new Date(Date.now() - 60_000) })
       .where(eq(invitations.id, inv2.invitation.id));
 
-    expect((await listIncomingInvitations(unrelatedEmail, true)).length).toBe(0);
+    expect((await listIncomingInvitations(unrelatedEmail)).length).toBe(0);
     await expect(
-      acceptInvitation(expiredInviteToken, unrelatedUserId, unrelatedEmail, true)
+      acceptInvitation(expiredInviteToken, unrelatedUserId, unrelatedEmail)
     ).rejects.toMatchObject({ statusCode: 400 });
 
     const [expiredRow] = await db
