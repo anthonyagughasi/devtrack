@@ -127,15 +127,24 @@ function isGoogleOAuthConfigured(): boolean {
 
 const app = express();
 app.set('trust proxy', 1);
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  const mutableReq = req as Request & { _body?: boolean; readableEnded?: boolean };
+  if (mutableReq.body !== undefined && mutableReq.readableEnded) {
+    mutableReq._body = true;
+  }
+  next();
+});
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 
 function isHttpsRequest(req: Request): boolean {
   const forwardedProto = req.headers['x-forwarded-proto'];
-  const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  const rawProto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+  const proto = rawProto?.split(',')[0]?.trim().toLowerCase();
   return (
     req.secure ||
     proto === 'https' ||
+    Boolean(process.env.VERCEL) ||
     (process.env.APP_URL?.trim().startsWith('https://') ?? false)
   );
 }
@@ -145,8 +154,12 @@ function getBaseUrl(req: Request): string {
   if (configured && configured !== 'MY_APP_URL') {
     return configured;
   }
+  const host = req.get('host');
+  if (!host) {
+    return 'http://localhost:3000';
+  }
   const proto = isHttpsRequest(req) ? 'https' : req.protocol;
-  return `${proto}://${req.get('host')}`;
+  return `${proto}://${host}`;
 }
 
 function setSessionCookie(res: Response, req: Request, rawToken: string) {

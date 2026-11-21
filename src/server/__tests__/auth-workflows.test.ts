@@ -2,7 +2,11 @@ import 'dotenv/config';
 import { afterAll, describe, expect, it } from 'vitest';
 import { eq, inArray } from 'drizzle-orm';
 import type { DecodedIdToken } from 'firebase-admin/auth';
-import { db } from '../../db/index.ts';
+import {
+  assertDatabaseConfigured,
+  db,
+  getDatabaseConfigurationError,
+} from '../../db/index.ts';
 import {
   emailVerificationTokens,
   oauthAccounts,
@@ -16,6 +20,7 @@ import {
   registerSchema,
   resetPasswordSchema,
 } from '../../lib/validations.ts';
+import { mapDatabaseError } from '../errors.ts';
 import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
 import {
   DEFAULT_DEV_SENDER,
@@ -395,4 +400,45 @@ describe('DevTrack Authentication Workflows (Live Cloud SQL PostgreSQL)', () => 
     expect(unauthNext).toBe(false);
     expect(unauthStatus).toBe(401);
   });
+
+  it('14. maps database connectivity and duplicate constraint errors cleanly without opaque 500s', () => {
+    const dupErr = mapDatabaseError(
+      { cause: { code: '23505', constraint: 'users_email_unique', message: 'duplicate key' } },
+      { duplicateMessage: 'An account with this email address already exists.' }
+    );
+    expect(dupErr?.statusCode).toBe(409);
+
+    const connRefused = mapDatabaseError({ cause: { code: 'ECONNREFUSED', message: 'connect ECONNREFUSED' } });
+    expect(connRefused?.statusCode).toBe(503);
+
+    const missingTable = mapDatabaseError({ cause: { code: '42P01', message: 'relation "users" does not exist' } });
+    expect(missingTable?.statusCode).toBe(503);
+
+    const savedEnv = {
+      VERCEL: process.env.VERCEL,
+      DATABASE_URL: process.env.DATABASE_URL,
+      POSTGRES_URL: process.env.POSTGRES_URL,
+      SQL_HOST: process.env.SQL_HOST,
+      SQL_USER: process.env.SQL_USER,
+      SQL_DB_NAME: process.env.SQL_DB_NAME,
+    };
+
+    try {
+      delete process.env.DATABASE_URL;
+      delete process.env.POSTGRES_URL;
+      process.env.VERCEL = '1';
+      process.env.SQL_HOST = '/cloudsql/spatial-campaign-nlvvl:europe-west2:devtrack';
+      expect(getDatabaseConfigurationError()).toContain('/cloudsql/');
+      expect(() => assertDatabaseConfigured()).toThrow(/Cloud SQL Auth Proxy/i);
+
+      delete process.env.SQL_HOST;
+      expect(getDatabaseConfigurationError()).toContain('DATABASE_URL');
+    } finally {
+      for (const [k, v] of Object.entries(savedEnv)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
 });
+

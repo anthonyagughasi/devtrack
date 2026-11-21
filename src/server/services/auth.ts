@@ -2,7 +2,7 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import type { DecodedIdToken } from 'firebase-admin/auth';
-import { db } from '../../db/index.ts';
+import { assertDatabaseConfigured, db, type Database } from '../../db/index.ts';
 import {
   emailVerificationTokens,
   oauthAccounts,
@@ -10,7 +10,7 @@ import {
   sessions,
   users,
 } from '../../db/schema.ts';
-import { AppError } from '../errors.ts';
+import { AppError, mapDatabaseError } from '../errors.ts';
 import {
   getMissingEmailConfigMessage,
   isEmailProviderConfigured,
@@ -20,7 +20,7 @@ import {
 import { syncPendingInvitationNotificationsForUser } from './team.ts';
 import { getOrCreateUser, sanitizeUser, type UserRecord } from './users.ts';
 
-const BCRYPT_ROUNDS = 12;
+const BCRYPT_ROUNDS = 10;
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 const VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -47,16 +47,20 @@ export function isEmailVerificationEnforced(): boolean {
   return false;
 }
 
+type DbOrTx = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
+
 export async function createSessionRecord(
   userId: number,
-  userAgent?: string
+  userAgent?: string,
+  executor: DbOrTx = db
 ): Promise<string> {
   try {
+    assertDatabaseConfigured();
     const rawToken = generateSecureToken();
     const tokenHash = hashToken(rawToken);
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
 
-    await db.insert(sessions).values({
+    await executor.insert(sessions).values({
       userId,
       tokenHash,
       expiresAt,
@@ -65,6 +69,9 @@ export async function createSessionRecord(
 
     return rawToken;
   } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error('Failed to create database session:', error);
     throw new AppError(500, 'Failed to create authentication session.', { cause: error });
   }
@@ -74,6 +81,7 @@ export async function getUserBySessionToken(
   rawToken: string
 ): Promise<UserRecord | null> {
   try {
+    assertDatabaseConfigured();
     const tokenHash = hashToken(rawToken);
     const rows = await db
       .select({ user: users })
@@ -85,6 +93,9 @@ export async function getUserBySessionToken(
     if (rows.length === 0) return null;
     return sanitizeUser(rows[0].user);
   } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error('Failed to validate session:', error);
     throw new AppError(500, 'Failed to validate session.', { cause: error });
   }
@@ -92,9 +103,13 @@ export async function getUserBySessionToken(
 
 export async function deleteSessionByToken(rawToken: string): Promise<void> {
   try {
+    assertDatabaseConfigured();
     const tokenHash = hashToken(rawToken);
     await db.delete(sessions).where(eq(sessions.tokenHash, tokenHash));
   } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error('Failed to delete session:', error);
     throw new AppError(500, 'Failed to sign out cleanly.', { cause: error });
   }
@@ -108,6 +123,7 @@ export async function registerWithEmail(input: {
   userAgent?: string;
 }) {
   try {
+    assertDatabaseConfigured();
     const cleanEmail = input.email.trim().toLowerCase();
     const [existing] = await db
       .select({ id: users.id })
@@ -121,7 +137,7 @@ export async function registerWithEmail(input: {
 
     const passwordHash = await hashPassword(input.password);
 
-    const createdUser = await db.transaction(async (tx) => {
+    const { createdUser, sessionToken } = await db.transaction(async (tx) => {
       const [inserted] = await tx
         .insert(users)
         .values({
@@ -134,11 +150,10 @@ export async function registerWithEmail(input: {
         .returning();
 
       await syncPendingInvitationNotificationsForUser(tx, inserted.id);
+      const token = await createSessionRecord(inserted.id, input.userAgent, tx);
 
-      return inserted;
+      return { createdUser: inserted, sessionToken: token };
     });
-
-    const sessionToken = await createSessionRecord(createdUser.id, input.userAgent);
 
     return {
       user: sanitizeUser(createdUser),
@@ -149,6 +164,13 @@ export async function registerWithEmail(input: {
     };
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error, {
+      duplicateMessage: 'An account with this email address already exists.',
+    });
+    if (mapped) {
+      console.error('Email registration database error:', error);
+      throw mapped;
+    }
     console.error('Email registration failed:', error);
     throw new AppError(500, 'Failed to create account.', { cause: error });
   }
@@ -160,6 +182,7 @@ export async function loginWithEmail(input: {
   userAgent?: string;
 }) {
   try {
+    assertDatabaseConfigured();
     const cleanEmail = input.email.trim().toLowerCase();
     const [user] = await db
       .select()
@@ -185,6 +208,11 @@ export async function loginWithEmail(input: {
     };
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) {
+      console.error('Email login database error:', error);
+      throw mapped;
+    }
     console.error('Email login failed:', error);
     throw new AppError(500, 'Authentication failed.', { cause: error });
   }
@@ -195,6 +223,7 @@ export async function authenticateWithGoogleToken(
   userAgent?: string
 ) {
   try {
+    assertDatabaseConfigured();
     const email = decoded.email || `${decoded.uid}@users.devtrack.app`;
     const isVerified = Boolean(decoded.email_verified);
     const user = await getOrCreateUser(
@@ -220,6 +249,11 @@ export async function authenticateWithGoogleToken(
     return { user, sessionToken };
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) {
+      console.error('Google OAuth database error:', error);
+      throw mapped;
+    }
     console.error('Google OAuth session creation failed:', error);
     throw new AppError(500, 'Failed to complete Google authentication.', {
       cause: error,

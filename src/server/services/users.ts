@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm';
-import { db } from '../../db/index.ts';
+import { assertDatabaseConfigured, db } from '../../db/index.ts';
 import { users } from '../../db/schema.ts';
-import { AppError } from '../errors.ts';
+import { AppError, mapDatabaseError } from '../errors.ts';
 
 export interface DbUserRow {
   id: number;
@@ -67,6 +67,7 @@ export async function getOrCreateUser(
   markEmailVerified = false
 ): Promise<UserRecord> {
   try {
+    assertDatabaseConfigured();
     const cleanEmail = email.trim().toLowerCase();
     const displayName = name?.trim() || cleanEmail.split('@')[0] || 'Developer';
 
@@ -160,6 +161,8 @@ export async function getOrCreateUser(
     throw new AppError(500, 'Failed to synchronize user profile.');
   } catch (error) {
     if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
     console.error('Failed to upsert user:', error);
     throw new AppError(500, 'Failed to synchronize user profile.', { cause: error });
   }
