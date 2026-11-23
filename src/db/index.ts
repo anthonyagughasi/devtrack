@@ -105,7 +105,6 @@ export function getDatabaseConfigurationError(): string | null {
     }
 
     const saJson = readEnv('GCP_SERVICE_ACCOUNT_KEY');
-    const credsPath = readEnv('GOOGLE_APPLICATION_CREDENTIALS');
     if (saJson) {
       try {
         parseServiceAccountCredentials(saJson);
@@ -114,15 +113,13 @@ export function getDatabaseConfigurationError(): string | null {
           ? err.message
           : 'GCP_SERVICE_ACCOUNT_KEY is invalid.';
       }
-    } else if (!credsPath) {
-      return 'CLOUD_SQL_CONNECTION_NAME requires GCP_SERVICE_ACCOUNT_KEY (service account JSON with roles/cloudsql.client) in Vercel or external environments.';
     }
     return null;
   }
 
   if (isUnixSocketHost(sqlHost)) {
     if (process.env.VERCEL || !fs.existsSync(sqlHost!)) {
-      return `Cloud SQL Auth Proxy Unix socket (${sqlHost}) is not reachable in this runtime. For Vercel production, configure CLOUD_SQL_CONNECTION_NAME and GCP_SERVICE_ACCOUNT_KEY (recommended), or set SQL_HOST to the Cloud SQL instance Public IP with SQL_SSL_CA.`;
+      return `Cloud SQL Auth Proxy Unix socket (${sqlHost}) is not reachable in this runtime. Run inside Google AI Studio / Cloud Run with the mounted socket, or configure CLOUD_SQL_CONNECTION_NAME (with Application Default Credentials or GCP_SERVICE_ACCOUNT_KEY) or Public IP + SQL_SSL_CA.`;
     }
     return null;
   }

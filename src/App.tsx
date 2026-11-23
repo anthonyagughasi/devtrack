@@ -33,14 +33,8 @@ function parseAuthLocation(): { route: AuthRoute; token?: string } {
 
   const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
   const params = new URLSearchParams(window.location.search);
-  const oobCode = params.get('oobCode')?.trim();
-  const mode = params.get('mode')?.trim();
-  const token = oobCode || params.get('token')?.trim() || undefined;
+  const token = params.get('token')?.trim() || params.get('oobCode')?.trim() || undefined;
   const viewParam = params.get('view')?.trim();
-
-  if (mode === 'resetPassword' && oobCode) {
-    return { route: 'reset-password', token: oobCode };
-  }
 
   if (pathname in PATH_TO_AUTH_ROUTE) {
     return { route: PATH_TO_AUTH_ROUTE[pathname], token };
@@ -61,7 +55,7 @@ function parseAuthLocation(): { route: AuthRoute; token?: string } {
 function authRouteToPath(route: AuthRoute, token?: string): string {
   const base = route === 'landing' ? '/' : `/${route}`;
   if (token) {
-    return `${base}?oobCode=${encodeURIComponent(token)}`;
+    return `${base}?token=${encodeURIComponent(token)}`;
   }
   return base;
 }

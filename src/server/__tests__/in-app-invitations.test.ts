@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { afterAll, describe, expect, it } from 'vitest';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { DecodedIdToken } from 'firebase-admin/auth';
-import { db } from '../../db/index.ts';
+import { db, getDatabaseConfigurationError } from '../../db/index.ts';
 import {
   invitations,
   projectMembers,
@@ -29,8 +29,10 @@ const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 const createdUserIds: number[] = [];
 const createdProjectIds: number[] = [];
 
+const hasLiveCloudSql = !getDatabaseConfigurationError();
+
 afterAll(async () => {
-  if (!process.env.DATABASE_URL) return;
+  if (!hasLiveCloudSql) return;
   if (createdProjectIds.length > 0) {
     await db.delete(projects).where(inArray(projects.id, createdProjectIds));
   }
@@ -57,8 +59,8 @@ function fakeFirebaseToken(input: {
   } as unknown as DecodedIdToken;
 }
 
-describe.runIf(Boolean(process.env.DATABASE_URL))(
-  'DevTrack Email-Based In-App Project Invitations (Live Neon PostgreSQL)',
+describe.runIf(hasLiveCloudSql)(
+  'DevTrack Email-Based In-App Project Invitations (Live Google Cloud SQL PostgreSQL)',
   () => {
     const ownerEmail = `inv-owner-${suffix}@example.com`;
     const unregisteredEmail = `Future.Colleague-${suffix}@Example.COM`;

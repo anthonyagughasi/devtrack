@@ -1,11 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  EmailAuthProvider,
-  linkWithCredential,
-  reauthenticateWithCredential,
-  updatePassword,
-} from 'firebase/auth';
-import {
   CheckCircle2,
   KeyRound,
   LogOut,
@@ -14,7 +8,7 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
-import { mapFirebaseAuthError, useAuth } from '../../context/AuthContext';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/api';
 import { cn, formatDate } from '../../lib/utils';
@@ -27,7 +21,7 @@ const ALLOWED_AVATAR_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 
 export function SettingsView() {
-  const { firebaseUser, profile, refreshProfile, applyTheme, signOut } = useAuth();
+  const { profile, refreshProfile, applyTheme, signOut } = useAuth();
   const { showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -46,10 +40,6 @@ export function SettingsView() {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [savingPassword, setSavingPassword] = useState(false);
-
-  const hasPasswordProvider = Boolean(
-    firebaseUser?.providerData?.some((provider) => provider.providerId === 'password')
-  );
 
   useEffect(() => {
     if (!profile) return;
@@ -165,39 +155,28 @@ export function SettingsView() {
       showToast('New passwords do not match.', 'error');
       return;
     }
-    if (!firebaseUser || !firebaseUser.email) {
-      showToast(
-        'Active Firebase session required. Please sign out and sign in again before changing your password.',
-        'error'
-      );
-      return;
-    }
+    if (!profile) return;
 
     setSavingPassword(true);
     try {
-      if (hasPasswordProvider) {
-        if (!currentPassword) {
-          showToast('Please enter your current password.', 'error');
-          return;
-        }
-        const credential = EmailAuthProvider.credential(firebaseUser.email, currentPassword);
-        await reauthenticateWithCredential(firebaseUser, credential);
-        await updatePassword(firebaseUser, newPassword);
-      } else {
-        const credential = EmailAuthProvider.credential(firebaseUser.email, newPassword);
-        await linkWithCredential(firebaseUser, credential);
-      }
-      await firebaseUser.reload().catch(() => undefined);
+      await apiFetch('/api/me/password', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          currentPassword: profile.hasPassword ? currentPassword : '',
+          newPassword,
+          confirmPassword,
+        }),
+      });
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
       await refreshProfile();
       showToast(
-        hasPasswordProvider ? 'Password updated.' : 'Password set for email sign-in.',
+        profile.hasPassword ? 'Password updated.' : 'Password set for email sign-in.',
         'success'
       );
     } catch (err) {
-      showToast(mapFirebaseAuthError(err, 'Failed to update password.'), 'error');
+      showToast(err instanceof Error ? err.message : 'Failed to update password.', 'error');
     } finally {
       setSavingPassword(false);
     }
@@ -383,17 +362,17 @@ export function SettingsView() {
         <div className="flex items-center gap-2">
           <KeyRound className="h-4 w-4 text-blue-500" />
           <h3 className="font-display text-sm font-semibold">
-            {hasPasswordProvider ? 'Change Password' : 'Set Account Password'}
+            {profile.hasPassword ? 'Change Password' : 'Set Account Password'}
           </h3>
         </div>
         <p className="text-xs text-neutral-500">
-          {hasPasswordProvider
+          {profile.hasPassword
             ? 'Update the password used for email sign-in. Passwords must be at least 8 characters and include uppercase, lowercase, and numeric characters.'
             : 'Add a password so you can also sign in directly with your email address.'}
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          {hasPasswordProvider && (
+          {profile.hasPassword && (
             <div>
               <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-300 mb-1.5">
                 Current Password
@@ -440,7 +419,7 @@ export function SettingsView() {
 
         <div className="flex justify-end">
           <Button type="submit" variant="secondary" loading={savingPassword}>
-            {hasPasswordProvider ? 'Update Password' : 'Set Password'}
+            {profile.hasPassword ? 'Update Password' : 'Set Password'}
           </Button>
         </div>
       </form>

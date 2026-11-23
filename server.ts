@@ -5,16 +5,21 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { ZodError } from 'zod';
-import { getDatabaseConfigurationError } from './src/db/index.ts';
+import { ensureDatabaseReady, getDatabaseConfigurationError } from './src/db/index.ts';
 import firebaseAppletConfig from './firebase-applet-config.json' with { type: 'json' };
 import { adminAuth, isFirebaseAdminConfigured } from './src/lib/firebase-admin.ts';
 import {
   acceptInvitationSchema,
+  changePasswordSchema,
   commentSchema,
   createProjectSchema,
   createTaskSchema,
+  forgotPasswordSchema,
   inviteMemberSchema,
+  loginSchema,
   moveTaskSchema,
+  registerSchema,
+  resetPasswordSchema,
   updateMemberRoleSchema,
   updateProjectSchema,
   updateTaskSchema,
@@ -25,7 +30,12 @@ import { requireAuth, type AuthRequest } from './src/server/middleware/auth.ts';
 import { listAccessibleActivities } from './src/server/services/activity.ts';
 import {
   SESSION_COOKIE_NAME,
+  changeUserPassword,
   deleteSessionByToken,
+  loginWithEmail,
+  registerWithEmail,
+  requestPasswordReset,
+  resetPasswordWithToken,
   syncAuthenticatedFirebaseUser,
 } from './src/server/services/auth.ts';
 import { getDashboardAnalytics } from './src/server/services/dashboard.ts';
@@ -99,14 +109,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 function isGoogleOAuthConfigured(): boolean {
-  const apiKey = process.env.VITE_FIREBASE_API_KEY?.trim() || firebaseAppletConfig.apiKey;
-  const authDomain =
-    process.env.VITE_FIREBASE_AUTH_DOMAIN?.trim() || firebaseAppletConfig.authDomain;
-  const projectId =
-    process.env.FIREBASE_PROJECT_ID?.trim() ||
-    process.env.VITE_FIREBASE_PROJECT_ID?.trim() ||
-    firebaseAppletConfig.projectId;
-  return Boolean(apiKey && authDomain && projectId);
+  return Boolean(
+    firebaseAppletConfig.apiKey &&
+      firebaseAppletConfig.authDomain &&
+      firebaseAppletConfig.projectId
+  );
 }
 
 const app = express();
@@ -188,6 +195,8 @@ function extractFirebaseToken(req: Request): string {
 }
 
 const handleFirebaseSessionSync = asyncHandler(async (req, res) => {
+  await ensureDatabaseReady();
+
   if (!isFirebaseAdminConfigured()) {
     res.status(503).json({
       error: 'Firebase Authentication is not configured on this server.',
@@ -224,6 +233,19 @@ const handleFirebaseSessionSync = asyncHandler(async (req, res) => {
   res.json({ user: result.user });
 });
 
+// Lazy Cloud SQL initialization guard for database-backed API routes
+app.use('/api', (req: Request, _res: Response, next: NextFunction) => {
+  if (
+    req.path === '/health' ||
+    req.path === '/auth/config' ||
+    req.path === '/auth/logout'
+  ) {
+    next();
+    return;
+  }
+  ensureDatabaseReady().then(() => next(), next);
+});
+
 // Health check
 app.get('/api/health', (_req: Request, res: Response) => {
   const dbError = getDatabaseConfigurationError();
@@ -235,17 +257,69 @@ app.get('/api/health', (_req: Request, res: Response) => {
   });
 });
 
-// Authentication Configuration & Firebase Session Endpoints
+// Authentication Configuration & Endpoints
 app.get('/api/auth/config', (_req: Request, res: Response) => {
   res.json({
     firebaseConfigured: isFirebaseAdminConfigured(),
     googleConfigured: isGoogleOAuthConfigured(),
+    emailConfigured: false,
     emailVerificationEnforced: false,
   });
 });
 
-app.post('/api/auth/session', handleFirebaseSessionSync);
+app.post(
+  '/api/auth/register',
+  asyncHandler(async (req, res) => {
+    const parsed = registerSchema.parse(req.body);
+    const result = await registerWithEmail({
+      name: parsed.name,
+      email: parsed.email,
+      password: parsed.password,
+      userAgent: req.get('user-agent'),
+    });
+    setSessionCookie(res, req, result.sessionToken);
+    res.status(201).json({
+      user: result.user,
+      requiresVerification: result.requiresVerification,
+      message: result.message,
+    });
+  })
+);
+
+app.post(
+  '/api/auth/login',
+  asyncHandler(async (req, res) => {
+    const parsed = loginSchema.parse(req.body);
+    const result = await loginWithEmail({
+      email: parsed.email,
+      password: parsed.password,
+      userAgent: req.get('user-agent'),
+    });
+    setSessionCookie(res, req, result.sessionToken);
+    res.json({ user: result.user });
+  })
+);
+
 app.post('/api/auth/google', handleFirebaseSessionSync);
+app.post('/api/auth/session', handleFirebaseSessionSync);
+
+app.post(
+  '/api/auth/forgot-password',
+  asyncHandler(async (req, res) => {
+    const parsed = forgotPasswordSchema.parse(req.body);
+    const result = await requestPasswordReset(parsed.email);
+    res.json(result);
+  })
+);
+
+app.post(
+  '/api/auth/reset-password',
+  asyncHandler(async (req, res) => {
+    const parsed = resetPasswordSchema.parse(req.body);
+    const result = await resetPasswordWithToken(parsed.token, parsed.password);
+    res.json(result);
+  })
+);
 
 app.post(
   '/api/auth/logout',
@@ -275,6 +349,20 @@ app.patch(
     const parsed = updateUserSettingsSchema.parse(req.body);
     const updated = await updateUserSettings(req.dbUser!.id, parsed);
     res.json({ user: updated });
+  })
+);
+
+app.patch(
+  '/api/me/password',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const parsed = changePasswordSchema.parse(req.body);
+    await changeUserPassword(
+      req.dbUser!.id,
+      parsed.currentPassword,
+      parsed.newPassword
+    );
+    res.json({ success: true });
   })
 );
 

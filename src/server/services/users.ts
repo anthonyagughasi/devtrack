@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { assertDatabaseConfigured, db, type Database } from '../../db/index.ts';
+import { db, ensureDatabaseReady, type Database } from '../../db/index.ts';
 import { oauthAccounts, users } from '../../db/schema.ts';
 import { AppError, mapDatabaseError } from '../errors.ts';
 
@@ -214,7 +214,7 @@ export async function syncFirebaseUser(
   input: SyncFirebaseUserInput
 ): Promise<{ user: UserRecord; isNewUser: boolean }> {
   try {
-    assertDatabaseConfigured();
+    await ensureDatabaseReady();
     return await db.transaction(async (tx) => syncFirebaseUserWithExecutor(tx, input));
   } catch (error) {
     if (error instanceof AppError) throw error;
@@ -248,7 +248,7 @@ export async function updateUserSettings(
   }
 ): Promise<UserRecord> {
   try {
-    assertDatabaseConfigured();
+    await ensureDatabaseReady();
     const updatePayload: Partial<typeof users.$inferInsert> = {
       updatedAt: new Date(),
     };
@@ -286,7 +286,7 @@ export async function updateUserAvatar(
   avatarDataUri: string | null
 ): Promise<UserRecord> {
   try {
-    assertDatabaseConfigured();
+    await ensureDatabaseReady();
     const [updated] = await db
       .update(users)
       .set({

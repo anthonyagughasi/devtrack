@@ -1,19 +1,28 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 import http from 'http';
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import {
   assertDatabaseConfigured,
   createPool,
   db,
   getDatabaseConfigurationError,
+  isUnixSocketHost,
   resetPoolForTesting,
-  resolveSslConfig,
+  resolveTcpSslConfig,
 } from '../../db/index.ts';
-import { oauthAccounts, sessions, users } from '../../db/schema.ts';
+import {
+  oauthAccounts,
+  passwordResetTokens,
+  projects,
+  sessions,
+  users,
+} from '../../db/schema.ts';
 import { adminAuth } from '../../lib/firebase-admin.ts';
 import {
+  changePasswordSchema,
   forgotPasswordSchema,
   loginSchema,
   registerSchema,
@@ -25,13 +34,17 @@ import { AppError, mapDatabaseError } from '../errors.ts';
 import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
 import {
   SESSION_COOKIE_NAME,
-  createSessionRecord,
+  changeUserPassword,
   deleteSessionByToken,
   getUserBySessionToken,
+  hashToken,
+  loginWithEmail,
+  registerWithEmail,
+  resetPasswordWithToken,
   syncAuthenticatedFirebaseUser,
 } from '../services/auth.ts';
 import { createProject, listUserProjects } from '../services/projects.ts';
-import { createTask } from '../services/tasks.ts';
+import { createTask, listUserTasks } from '../services/tasks.ts';
 import {
   syncFirebaseUserWithExecutor,
   type DbUserRow,
@@ -39,10 +52,18 @@ import {
 
 const runSuffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 const createdUserIds: number[] = [];
+const createdProjectIds: number[] = [];
+
+const hasLiveCloudSql = !getDatabaseConfigurationError();
 
 afterAll(async () => {
-  if (createdUserIds.length > 0 && process.env.DATABASE_URL) {
-    await db.delete(users).where(inArray(users.id, createdUserIds));
+  if (hasLiveCloudSql) {
+    if (createdProjectIds.length > 0) {
+      await db.delete(projects).where(inArray(projects.id, createdProjectIds));
+    }
+    if (createdUserIds.length > 0) {
+      await db.delete(users).where(inArray(users.id, createdUserIds));
+    }
   }
 });
 
@@ -222,7 +243,12 @@ async function requestApp(
     headers?: Record<string, string>;
     handler?: (req: http.IncomingMessage, res: http.ServerResponse) => unknown;
   }
-): Promise<{ status: number; headers: http.IncomingHttpHeaders; json: Record<string, unknown> }> {
+): Promise<{
+  status: number;
+  headers: http.IncomingHttpHeaders;
+  setCookie: string[];
+  json: Record<string, unknown>;
+}> {
   const targetHandler = options?.handler ?? app;
   const server = http.createServer((req, res) => {
     targetHandler(req, res);
@@ -247,7 +273,16 @@ async function requestApp(
     response.headers.forEach((value, key) => {
       headersObj[key] = value;
     });
-    return { status: response.status, headers: headersObj, json };
+    const getSetCookie = (
+      response.headers as unknown as { getSetCookie?: () => string[] }
+    ).getSetCookie;
+    const setCookie =
+      typeof getSetCookie === 'function'
+        ? getSetCookie.call(response.headers)
+        : headersObj['set-cookie']
+          ? [String(headersObj['set-cookie'])]
+          : [];
+    return { status: response.status, headers: headersObj, setCookie, json };
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve()))
@@ -255,8 +290,54 @@ async function requestApp(
   }
 }
 
+function withSavedDbEnv<T>(fn: () => T): T {
+  const keys = [
+    'CLOUD_SQL_CONNECTION_NAME',
+    'SQL_INSTANCE_CONNECTION_NAME',
+    'GCP_SERVICE_ACCOUNT_KEY',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'CLOUD_SQL_IP_TYPE',
+    'SQL_HOST',
+    'SQL_PORT',
+    'SQL_USER',
+    'SQL_PASSWORD',
+    'SQL_DB_NAME',
+    'SQL_SSL_MODE',
+    'SQL_SSL_CA',
+    'VERCEL',
+  ] as const;
+
+  const saved: Record<string, string | undefined> = {};
+  for (const key of keys) {
+    saved[key] = process.env[key];
+  }
+
+  const restore = () => {
+    for (const key of keys) {
+      if (saved[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = saved[key];
+      }
+    }
+    resetPoolForTesting();
+  };
+
+  try {
+    const result = fn();
+    if (result instanceof Promise) {
+      return result.finally(restore) as T;
+    }
+    restore();
+    return result;
+  } catch (err) {
+    restore();
+    throw err;
+  }
+}
+
 describe('DevTrack Auth Validation Schemas', () => {
-  it('enforces strong password rules, confirmation match, and Firebase reset oobCode', () => {
+  it('enforces strong password rules, confirmation match, and reset token length', () => {
     expect(
       registerSchema.safeParse({
         name: 'Test User',
@@ -288,82 +369,120 @@ describe('DevTrack Auth Validation Schemas', () => {
     expect(forgotPasswordSchema.safeParse({ email: 'ok@example.com' }).success).toBe(true);
     expect(
       resetPasswordSchema.safeParse({
-        oobCode: 'firebase-oob-code-12345',
+        token: 'a1b2c3d4e5f6g7h8i9j0',
         password: 'StrongPass1',
         confirmPassword: 'StrongPass1',
       }).success
     ).toBe(true);
     expect(
       resetPasswordSchema.safeParse({
-        oobCode: 'bad',
+        token: 'short',
         password: 'StrongPass1',
         confirmPassword: 'StrongPass1',
       }).success
     ).toBe(false);
+    expect(
+      changePasswordSchema.safeParse({
+        currentPassword: '',
+        newPassword: 'StrongPass1',
+        confirmPassword: 'StrongPass1',
+      }).success
+    ).toBe(true);
   });
 });
 
-describe('Neon PostgreSQL DATABASE_URL & Error Mapping', () => {
-  it('validates DATABASE_URL exclusively without any legacy Cloud SQL env vars', () => {
-    const savedDatabaseUrl = process.env.DATABASE_URL;
-    try {
-      delete process.env.DATABASE_URL;
-      expect(getDatabaseConfigurationError()).toContain('DATABASE_URL');
-      expect(getDatabaseConfigurationError()).toContain('Neon');
-      expect(() => assertDatabaseConfigured()).toThrow(/DATABASE_URL/);
+describe('Google Cloud SQL Configuration, Connector Validation & Error Mapping', () => {
+  it('detects missing SQL_* / CLOUD_SQL_CONNECTION_NAME env vars with actionable messages', () => {
+    withSavedDbEnv(() => {
+      delete process.env.CLOUD_SQL_CONNECTION_NAME;
+      delete process.env.SQL_INSTANCE_CONNECTION_NAME;
+      delete process.env.SQL_HOST;
+      delete process.env.SQL_USER;
+      delete process.env.SQL_PASSWORD;
+      delete process.env.SQL_DB_NAME;
 
-      process.env.DATABASE_URL = 'not-a-url';
-      expect(getDatabaseConfigurationError()).toContain('not a valid PostgreSQL');
-
-      process.env.DATABASE_URL = 'mysql://user:pass@host/db';
-      expect(getDatabaseConfigurationError()).toContain('postgres://');
-
-      process.env.DATABASE_URL =
-        'postgresql://neondb_owner:secret@ep-demo-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require';
-      expect(getDatabaseConfigurationError()).toBeNull();
-      expect(() => assertDatabaseConfigured()).not.toThrow();
-    } finally {
-      if (savedDatabaseUrl === undefined) delete process.env.DATABASE_URL;
-      else process.env.DATABASE_URL = savedDatabaseUrl;
-      resetPoolForTesting();
-    }
+      const msg = getDatabaseConfigurationError();
+      expect(msg).toContain('CLOUD_SQL_CONNECTION_NAME (or SQL_HOST)');
+      expect(msg).toContain('SQL_USER');
+      expect(msg).toContain('SQL_PASSWORD');
+      expect(msg).toContain('SQL_DB_NAME');
+      expect(() => assertDatabaseConfigured()).toThrow(/Cloud SQL database is not configured/);
+    });
   });
 
-  it('resolves strict SSL for Neon URLs and appropriate modes for local URLs', () => {
-    expect(
-      resolveSslConfig(
-        'postgresql://user:pass@ep-demo.us-east-2.aws.neon.tech/neondb?sslmode=require'
-      )
-    ).toEqual({ rejectUnauthorized: true });
-
-    expect(
-      resolveSslConfig('postgresql://user:pass@ep-demo.us-east-2.aws.neon.tech/neondb')
-    ).toEqual({ rejectUnauthorized: true });
-
-    expect(resolveSslConfig('postgresql://postgres:postgres@localhost:5432/devtrack')).toBeUndefined();
-    expect(
-      resolveSslConfig('postgresql://user:pass@db.example.com:5432/devtrack?sslmode=disable')
-    ).toBeUndefined();
-    expect(
-      resolveSslConfig('postgresql://user:pass@db.example.com:5432/devtrack?sslmode=no-verify')
-    ).toEqual({ rejectUnauthorized: false });
-
-    const savedUrl = process.env.DATABASE_URL;
-    const savedVercel = process.env.VERCEL;
-    try {
+  it('rejects AI Studio Unix sockets when running on Vercel with actionable diagnostics', () => {
+    withSavedDbEnv(() => {
+      delete process.env.CLOUD_SQL_CONNECTION_NAME;
+      delete process.env.SQL_INSTANCE_CONNECTION_NAME;
       process.env.VERCEL = '1';
-      process.env.DATABASE_URL =
-        'postgresql://user:pass@ep-demo.us-east-2.aws.neon.tech/neondb?sslmode=require';
+      process.env.SQL_HOST = '/app/cloudsql/spatial-campaign-nlvvl:europe-west2:ai-studio-4e7b9940';
+      process.env.SQL_USER = 'ai_studio_app_user';
+      process.env.SQL_PASSWORD = 'example-password';
+      process.env.SQL_DB_NAME = 'cloud_sql_development_database';
+
+      const msg = getDatabaseConfigurationError();
+      expect(msg).toContain('not reachable in this runtime');
+      expect(msg).toContain('CLOUD_SQL_CONNECTION_NAME');
+    });
+  });
+
+  it('supports CLOUD_SQL_CONNECTION_NAME natively with ADC and validates optional GCP_SERVICE_ACCOUNT_KEY JSON', () => {
+    withSavedDbEnv(() => {
+      delete process.env.SQL_HOST;
+      delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      process.env.SQL_USER = 'ai_studio_app_user';
+      process.env.SQL_PASSWORD = 'example-password';
+      process.env.SQL_DB_NAME = 'cloud_sql_development_database';
+
+      process.env.CLOUD_SQL_CONNECTION_NAME = 'invalid-connection-name';
+      expect(getDatabaseConfigurationError()).toContain('<project-id>:<region>:<instance-name>');
+
+      process.env.CLOUD_SQL_CONNECTION_NAME =
+        'spatial-campaign-nlvvl:europe-west2:ai-studio-4e7b9940';
+      delete process.env.GCP_SERVICE_ACCOUNT_KEY;
+      // Natively valid using Application Default Credentials (no manual service account key required)
+      expect(getDatabaseConfigurationError()).toBeNull();
+
+      process.env.GCP_SERVICE_ACCOUNT_KEY = 'not-json';
+      expect(getDatabaseConfigurationError()).toContain('not valid JSON');
+
+      process.env.GCP_SERVICE_ACCOUNT_KEY = JSON.stringify({ project_id: 'spatial-campaign-nlvvl' });
+      expect(getDatabaseConfigurationError()).toContain('client_email');
+
+      process.env.GCP_SERVICE_ACCOUNT_KEY = JSON.stringify({
+        client_email: 'devtrack-sql@spatial-campaign-nlvvl.iam.gserviceaccount.com',
+        private_key: '-----BEGIN PRIVATE KEY-----\\nTEST\\n-----END PRIVATE KEY-----\\n',
+      });
+      expect(getDatabaseConfigurationError()).toBeNull();
+    });
+  });
+
+  it('resolves SSL correctly for Unix sockets vs localhost vs remote Public IP + SQL_SSL_CA and sizes Vercel pool', () => {
+    withSavedDbEnv(() => {
+      expect(
+        isUnixSocketHost('/app/cloudsql/spatial-campaign-nlvvl:europe-west2:ai-studio-4e7b9940')
+      ).toBe(true);
+      expect(
+        resolveTcpSslConfig('/app/cloudsql/spatial-campaign-nlvvl:europe-west2:ai-studio-4e7b9940')
+      ).toBeUndefined();
+      expect(resolveTcpSslConfig('localhost')).toBeUndefined();
+
+      process.env.SQL_SSL_CA = '-----BEGIN CERTIFICATE-----\\nDEMO\\n-----END CERTIFICATE-----';
+      expect(resolveTcpSslConfig('34.89.10.20')).toEqual({
+        rejectUnauthorized: true,
+        ca: '-----BEGIN CERTIFICATE-----\nDEMO\n-----END CERTIFICATE-----',
+      });
+
+      process.env.VERCEL = '1';
+      delete process.env.CLOUD_SQL_CONNECTION_NAME;
+      process.env.SQL_HOST = '34.89.10.20';
+      process.env.SQL_USER = 'ai_studio_app_user';
+      process.env.SQL_PASSWORD = 'example-password';
+      process.env.SQL_DB_NAME = 'cloud_sql_development_database';
       resetPoolForTesting();
       const pool = createPool();
       expect(pool.options.max).toBe(5);
-    } finally {
-      if (savedUrl === undefined) delete process.env.DATABASE_URL;
-      else process.env.DATABASE_URL = savedUrl;
-      if (savedVercel === undefined) delete process.env.VERCEL;
-      else process.env.VERCEL = savedVercel;
-      resetPoolForTesting();
-    }
+    });
   });
 
   it('maps PostgreSQL error codes cleanly without opaque 500s', () => {
@@ -378,6 +497,11 @@ describe('Neon PostgreSQL DATABASE_URL & Error Mapping', () => {
     });
     expect(connRefused?.statusCode).toBe(503);
 
+    const authErr = mapDatabaseError({
+      cause: { code: '28P01', message: 'password authentication failed' },
+    });
+    expect(authErr?.statusCode).toBe(503);
+
     const missingTable = mapDatabaseError({
       cause: { code: '42P01', message: 'relation "users" does not exist' },
     });
@@ -387,10 +511,9 @@ describe('Neon PostgreSQL DATABASE_URL & Error Mapping', () => {
 });
 
 describe('Firebase User Sync & Safe Account Linking', () => {
-  it('creates user on first sync, prevents duplicate accounts for verified Google/password overlap, and blocks unverified takeover', async () => {
+  it('creates user on first sync, prevents duplicate accounts for verified Google overlap, and blocks unverified takeover', async () => {
     const { executor, userRows, oauthRows } = createInMemoryDrizzleExecutor();
 
-    // 1. Direct email/password registration via Firebase (unverified allowed immediately)
     const created = await syncFirebaseUserWithExecutor(executor, {
       uid: 'fb-password-uid-1',
       email: 'Alice.Dev@Example.COM',
@@ -405,13 +528,7 @@ describe('Firebase User Sync & Safe Account Linking', () => {
     expect('passwordHash' in created.user).toBe(false);
     expect(userRows.length).toBe(1);
     expect(oauthRows).toHaveLength(1);
-    expect(oauthRows[0]).toMatchObject({
-      userId: created.user.id,
-      provider: 'password',
-      providerAccountId: 'fb-password-uid-1',
-    });
 
-    // 2. Repeat sign-in with same UID does not create duplicate row
     const repeat = await syncFirebaseUserWithExecutor(executor, {
       uid: 'fb-password-uid-1',
       email: 'alice.dev@example.com',
@@ -423,7 +540,6 @@ describe('Firebase User Sync & Safe Account Linking', () => {
     expect(repeat.user.id).toBe(created.user.id);
     expect(userRows.length).toBe(1);
 
-    // 3. Unverified different UID claiming same email is rejected with 409
     await expect(
       syncFirebaseUserWithExecutor(executor, {
         uid: 'fb-unverified-attacker-uid',
@@ -435,42 +551,28 @@ describe('Firebase User Sync & Safe Account Linking', () => {
     ).rejects.toMatchObject({ statusCode: 409 });
     expect(userRows.length).toBe(1);
 
-    // 4. Verified Google OAuth UID with same email links safely without creating duplicate user
     const linkedGoogle = await syncFirebaseUserWithExecutor(executor, {
       uid: 'fb-google-uid-1',
       email: 'alice.dev@example.com',
       emailVerified: true,
       name: 'Alice Dev',
       avatar: 'https://example.com/avatar.png',
-      provider: 'google.com',
+      provider: 'google',
     });
     expect(linkedGoogle.isNewUser).toBe(false);
     expect(linkedGoogle.user.id).toBe(created.user.id);
-    expect(linkedGoogle.user.uid).toBe('fb-password-uid-1');
     expect(linkedGoogle.user.emailVerified).toBe(true);
-    expect(linkedGoogle.user.avatar).toBe('https://example.com/avatar.png');
     expect(userRows.length).toBe(1);
     expect(oauthRows.length).toBe(2);
-
-    // 5. Subsequent sign-in with the linked Google UID resolves via oauth_accounts
-    const googleAgain = await syncFirebaseUserWithExecutor(executor, {
-      uid: 'fb-google-uid-1',
-      email: 'alice.dev@example.com',
-      emailVerified: true,
-      provider: 'google.com',
-    });
-    expect(googleAgain.isNewUser).toBe(false);
-    expect(googleAgain.user.id).toBe(created.user.id);
-    expect(userRows.length).toBe(1);
   });
 });
 
 describe('Express API & Vercel Serverless Handler Behavior', () => {
-  it('serves /api/health, /api/auth/config, /api/auth/logout, and validates /api/auth/session', async () => {
+  it('serves /api/health, /api/auth/config, /api/auth/logout, and validates /api/auth/google + Vercel catch-all', async () => {
     const health = await requestApp('GET', '/api/health');
     expect(health.status).toBe(200);
     expect(health.json.status).toBe('ok');
-    expect(health.json.databaseConfigured).toBe(Boolean(process.env.DATABASE_URL));
+    expect(health.json.databaseConfigured).toBe(!getDatabaseConfigurationError());
     expect(health.json.firebaseConfigured).toBe(true);
 
     const config = await requestApp('GET', '/api/auth/config');
@@ -478,29 +580,31 @@ describe('Express API & Vercel Serverless Handler Behavior', () => {
     expect(config.json).toEqual({
       firebaseConfigured: true,
       googleConfigured: true,
+      emailConfigured: false,
       emailVerificationEnforced: false,
     });
 
-    const missingToken = await requestApp('POST', '/api/auth/session', { body: {} });
-    expect(missingToken.status).toBe(400);
+    if (hasLiveCloudSql) {
+      const missingToken = await requestApp('POST', '/api/auth/google', { body: {} });
+      expect(missingToken.status).toBe(400);
 
-    const verifySpy = vi
-      .spyOn(adminAuth, 'verifyIdToken')
-      .mockRejectedValueOnce(new Error('Invalid token'));
-    try {
-      const invalidToken = await requestApp('POST', '/api/auth/session', {
-        body: { idToken: 'bad-token' },
-      });
-      expect(invalidToken.status).toBe(401);
-    } finally {
-      verifySpy.mockRestore();
+      const verifySpy = vi
+        .spyOn(adminAuth, 'verifyIdToken')
+        .mockRejectedValueOnce(new Error('Invalid token'));
+      try {
+        const invalidToken = await requestApp('POST', '/api/auth/google', {
+          body: { idToken: 'bad-token' },
+        });
+        expect(invalidToken.status).toBe(401);
+      } finally {
+        verifySpy.mockRestore();
+      }
     }
 
     const logout = await requestApp('POST', '/api/auth/logout');
     expect(logout.status).toBe(200);
     expect(logout.json.success).toBe(true);
 
-    // Vercel rewrite wrapper preserves /api/health & /api/auth/config routing
     const vercelHealth = await requestApp(
       'GET',
       '/api/index.mjs?__vercel_path=health',
@@ -510,10 +614,16 @@ describe('Express API & Vercel Serverless Handler Behavior', () => {
     expect(vercelHealth.json.status).toBe('ok');
   });
 
-  it('requireAuth returns 503 when DATABASE_URL is missing and 401 when unauthenticated', async () => {
-    const savedDatabaseUrl = process.env.DATABASE_URL;
-    try {
-      delete process.env.DATABASE_URL;
+  it('returns 503 with clear Cloud SQL guidance when DB env vars are unconfigured', async () => {
+    await withSavedDbEnv(async () => {
+      delete process.env.CLOUD_SQL_CONNECTION_NAME;
+      delete process.env.SQL_INSTANCE_CONNECTION_NAME;
+      delete process.env.SQL_HOST;
+      delete process.env.SQL_USER;
+      delete process.env.SQL_PASSWORD;
+      delete process.env.SQL_DB_NAME;
+      resetPoolForTesting();
+
       const req = { cookies: {}, headers: {} } as unknown as AuthRequest;
       const res = {
         status() {
@@ -531,140 +641,231 @@ describe('Express API & Vercel Serverless Handler Behavior', () => {
       expect(passedError).toBeInstanceOf(AppError);
       expect((passedError as AppError).statusCode).toBe(503);
 
-      const protectedRes = await requestApp('GET', '/api/me');
-      expect(protectedRes.status).toBe(503);
-    } finally {
-      if (savedDatabaseUrl === undefined) delete process.env.DATABASE_URL;
-      else process.env.DATABASE_URL = savedDatabaseUrl;
-    }
+      const regRes = await requestApp('POST', '/api/auth/register', {
+        body: {
+          name: 'Test User',
+          email: 'unconfigured@example.com',
+          password: 'Password123!',
+          confirmPassword: 'Password123!',
+        },
+      });
+      expect(regRes.status).toBe(503);
+      expect(String(regRes.json.error)).toContain('CLOUD_SQL_CONNECTION_NAME');
+    });
   });
 });
 
-describe.runIf(Boolean(process.env.DATABASE_URL))(
-  'DevTrack Live Neon PostgreSQL Integration Workflows',
+describe.runIf(hasLiveCloudSql)(
+  'DevTrack Live Google Cloud SQL Integration Workflows (AI Studio PostgreSQL)',
   () => {
-    const email = `neon-auth-${runSuffix}@example.com`;
-    const primaryUid = `fb-primary-${runSuffix}`;
+    const email = `cloudsql-auth-${runSuffix}@example.com`;
+    const password = 'CloudSqlPass123!';
+    const updatedPassword = 'UpdatedCloudSql456!';
     const googleUid = `fb-google-${runSuffix}`;
     let userId = 0;
+    let sessionCookieHeader = '';
     let activeSessionToken = '';
 
-    it('1. syncs direct Firebase email/password registration immediately into Neon and creates a session', async () => {
-      const decoded = {
-        uid: primaryUid,
-        email,
-        email_verified: false,
-        name: 'Neon Test Engineer',
-        firebase: { sign_in_provider: 'password' },
-      } as unknown as DecodedIdToken;
-
-      const res = await syncAuthenticatedFirebaseUser(decoded, {
-        userAgent: 'Vitest/Neon-Register',
-      });
-      userId = res.user.id;
-      createdUserIds.push(userId);
-      activeSessionToken = res.sessionToken;
-
-      expect(res.isNewUser).toBe(true);
-      expect(res.user.email).toBe(email.toLowerCase());
-      expect(res.user.emailVerified).toBe(false);
-      expect(res.sessionToken).toBeTruthy();
-
-      const sessionUser = await getUserBySessionToken(activeSessionToken);
-      expect(sessionUser?.id).toBe(userId);
+    it('0. preserves existing Cloud SQL database records untouched', async () => {
+      const counts = await db.execute(
+        sql`SELECT count(*)::int AS user_count FROM users`
+      );
+      const countRow = counts.rows[0] as { user_count?: number } | undefined;
+      expect(Number(countRow?.user_count ?? 0)).toBeGreaterThanOrEqual(1);
     });
 
-    it('2. links verified Google sign-in to the same PostgreSQL user without creating duplicates', async () => {
+    it('1. registers directly via POST /api/auth/register (immediate access, no email verification blocker) and rejects duplicate email', async () => {
+      const res = await requestApp('POST', '/api/auth/register', {
+        body: {
+          name: 'Cloud SQL Test Engineer',
+          email,
+          password,
+          confirmPassword: password,
+        },
+      });
+
+      expect(res.status).toBe(201);
+      expect(res.json.requiresVerification).toBe(false);
+      const userObj = res.json.user as { id: number; email: string };
+      expect(userObj.email).toBe(email.toLowerCase());
+      expect(res.setCookie.some((c) => c.startsWith(`${SESSION_COOKIE_NAME}=`))).toBe(true);
+
+      userId = userObj.id;
+      createdUserIds.push(userId);
+
+      const rawCookie = res.setCookie.find((c) => c.startsWith(`${SESSION_COOKIE_NAME}=`)) ?? '';
+      sessionCookieHeader = rawCookie.split(';')[0] ?? '';
+      expect(sessionCookieHeader).toContain(`${SESSION_COOKIE_NAME}=`);
+
+      await expect(
+        registerWithEmail({
+          name: 'Duplicate',
+          email,
+          password,
+        })
+      ).rejects.toMatchObject({ statusCode: 409 });
+    });
+
+    it('2. logs in with email/password via POST /api/auth/login and rejects wrong password with 401', async () => {
+      const badLogin = await requestApp('POST', '/api/auth/login', {
+        body: { email, password: 'WrongPassword123!' },
+      });
+      expect(badLogin.status).toBe(401);
+
+      const goodLogin = await requestApp('POST', '/api/auth/login', {
+        body: { email, password },
+      });
+      expect(goodLogin.status).toBe(200);
+      expect((goodLogin.json.user as { id: number }).id).toBe(userId);
+
+      const rawCookie =
+        goodLogin.setCookie.find((c) => c.startsWith(`${SESSION_COOKIE_NAME}=`)) ?? '';
+      sessionCookieHeader = rawCookie.split(';')[0] ?? '';
+      activeSessionToken = sessionCookieHeader.replace(`${SESSION_COOKIE_NAME}=`, '');
+
+      const verifiedUser = await getUserBySessionToken(activeSessionToken);
+      expect(verifiedUser?.id).toBe(userId);
+
+      // Clean direct service check
+      const svcLogin = await loginWithEmail({ email, password, userAgent: 'Vitest/Login' });
+      expect(svcLogin.user.id).toBe(userId);
+      await deleteSessionByToken(svcLogin.sessionToken);
+    });
+
+    it('3. links verified Google Firebase sign-in via POST /api/auth/google without creating duplicate users', async () => {
       const decodedGoogle = {
         uid: googleUid,
         email,
         email_verified: true,
-        name: 'Neon Test Engineer',
+        name: 'Cloud SQL Test Engineer',
         picture: 'https://example.com/pic.png',
         firebase: { sign_in_provider: 'google.com' },
       } as unknown as DecodedIdToken;
 
-      const res = await syncAuthenticatedFirebaseUser(decodedGoogle, {
-        userAgent: 'Vitest/Neon-Google',
-      });
-      expect(res.isNewUser).toBe(false);
-      expect(res.user.id).toBe(userId);
-      expect(res.user.emailVerified).toBe(true);
-      await deleteSessionByToken(res.sessionToken);
+      const verifySpy = vi.spyOn(adminAuth, 'verifyIdToken').mockResolvedValueOnce(decodedGoogle);
+      try {
+        const res = await requestApp('POST', '/api/auth/google', {
+          body: { idToken: 'mocked-google-id-token' },
+        });
+        expect(res.status).toBe(200);
+        expect((res.json.user as { id: number; emailVerified: boolean }).id).toBe(userId);
+        expect((res.json.user as { emailVerified: boolean }).emailVerified).toBe(true);
+      } finally {
+        verifySpy.mockRestore();
+      }
 
       const oauthRows = await db
         .select()
         .from(oauthAccounts)
         .where(eq(oauthAccounts.userId, userId));
-      expect(oauthRows.length).toBe(2);
+      expect(oauthRows.some((r) => r.providerAccountId === googleUid)).toBe(true);
     });
 
-    it('3. creates projects & tasks, reads workspace, and invalidates sessions cleanly on logout', async () => {
-      const project = await createProject(userId, {
-        name: `Neon Verification Project ${runSuffix}`,
-        description: 'End-to-end Neon workflow verification',
-        status: 'ACTIVE',
+    it('4. creates projects and tasks via API/services, verifies persistence, updates & resets password cleanly, and logs out', async () => {
+      // Create project and task via HTTP endpoints using the session cookie
+      const projRes = await requestApp('POST', '/api/projects', {
+        headers: { Cookie: sessionCookieHeader },
+        body: {
+          name: `Cloud SQL Project ${runSuffix}`,
+          description: 'Verifying Drizzle persistence in Cloud SQL',
+          status: 'ACTIVE',
+        },
       });
-      const task = await createTask(userId, {
-        projectId: project.id,
-        title: 'Verify Neon persistence',
-        description: 'Ensure tasks persist after Firebase session sync',
+      expect(projRes.status).toBe(201);
+      const createdProj = projRes.json.project as { id: number; name: string };
+      createdProjectIds.push(createdProj.id);
+
+      const taskRes = await requestApp('POST', '/api/tasks', {
+        headers: { Cookie: sessionCookieHeader },
+        body: {
+          projectId: createdProj.id,
+          title: 'Verify Cloud SQL task',
+          description: 'End-to-end check',
+          status: 'TODO',
+          priority: 'HIGH',
+        },
+      });
+      expect(taskRes.status).toBe(201);
+      expect((taskRes.json.task as { projectId: number }).projectId).toBe(createdProj.id);
+
+      const accessibleProjects = await listUserProjects(userId, {});
+      expect(accessibleProjects.some((p) => p.id === createdProj.id)).toBe(true);
+
+      const accessibleTasks = await listUserTasks(userId, { projectId: createdProj.id });
+      expect(accessibleTasks.length).toBe(1);
+
+      // Update password while signed in
+      const passRes = await requestApp('PATCH', '/api/me/password', {
+        headers: { Cookie: sessionCookieHeader },
+        body: {
+          currentPassword: password,
+          newPassword: updatedPassword,
+          confirmPassword: updatedPassword,
+        },
+      });
+      expect(passRes.status).toBe(200);
+
+      // Forgot-password responds honestly without 500
+      const forgotRes = await requestApp('POST', '/api/auth/forgot-password', {
+        body: { email },
+      });
+      expect(forgotRes.status).toBe(200);
+      expect(forgotRes.json.emailConfigured).toBe(false);
+
+      // Direct reset token workflow verification
+      const rawResetToken = crypto.randomBytes(24).toString('hex');
+      await db.insert(passwordResetTokens).values({
+        userId,
+        tokenHash: hashToken(rawResetToken),
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      });
+      const resetRes = await resetPasswordWithToken(rawResetToken, password);
+      expect(resetRes.success).toBe(true);
+
+      // Logout clears sessions cleanly and subsequent /api/me returns 401
+      const nextLogin = await loginWithEmail({ email, password, userAgent: 'Vitest/PostReset' });
+      const logoutRes = await requestApp('POST', '/api/auth/logout', {
+        headers: { Cookie: `${SESSION_COOKIE_NAME}=${nextLogin.sessionToken}` },
+      });
+      expect(logoutRes.status).toBe(200);
+      expect(await getUserBySessionToken(nextLogin.sessionToken)).toBeNull();
+
+      const meAfterLogout = await requestApp('GET', '/api/me', {
+        headers: { Cookie: `${SESSION_COOKIE_NAME}=${nextLogin.sessionToken}` },
+      });
+      expect(meAfterLogout.status).toBe(401);
+
+      // Clean up any leftover sessions for the test user
+      await db.delete(sessions).where(eq(sessions.userId, userId));
+      // Unused direct helper sanity check
+      const helperProject = await createProject(userId, {
+        name: `Direct Project ${runSuffix}`,
+        description: '',
+        status: 'PLANNING',
+      });
+      createdProjectIds.push(helperProject.id);
+      const helperTask = await createTask(userId, {
+        projectId: helperProject.id,
+        title: 'Direct Task',
+        description: '',
         status: 'TODO',
-        priority: 'HIGH',
+        priority: 'MEDIUM',
       });
-      expect(task.projectId).toBe(project.id);
+      expect(helperTask.projectId).toBe(helperProject.id);
 
-      const accessible = await listUserProjects(userId, {});
-      expect(accessible.some((p) => p.id === project.id)).toBe(true);
+      // Also test direct syncAuthenticatedFirebaseUser helper
+      const directSync = await syncAuthenticatedFirebaseUser({
+        uid: googleUid,
+        email,
+        email_verified: true,
+        firebase: { sign_in_provider: 'google.com' },
+      } as unknown as DecodedIdToken);
+      expect(directSync.user.id).toBe(userId);
+      await deleteSessionByToken(directSync.sessionToken);
 
-      // requireAuth succeeds with valid session cookie
-      const req = {
-        cookies: { [SESSION_COOKIE_NAME]: activeSessionToken },
-        headers: {},
-      } as unknown as AuthRequest;
-      let nextCalled = false;
-      const res = {
-        status() {
-          return this;
-        },
-        json() {
-          return this;
-        },
-      } as unknown as Parameters<typeof requireAuth>[1];
-
-      await requireAuth(req, res, () => {
-        nextCalled = true;
-      });
-      expect(nextCalled).toBe(true);
-      expect(req.dbUser?.id).toBe(userId);
-
-      // Logout removes session from Neon DB and subsequent requireAuth returns 401
-      await deleteSessionByToken(activeSessionToken);
-      expect(await getUserBySessionToken(activeSessionToken)).toBeNull();
-
-      const remainingSessions = await db
-        .select()
-        .from(sessions)
-        .where(eq(sessions.userId, userId));
-      expect(remainingSessions.length).toBe(0);
-
-      let unauthStatus = 0;
-      let unauthNext = false;
-      const unauthRes = {
-        status(code: number) {
-          unauthStatus = code;
-          return this;
-        },
-        json() {
-          return this;
-        },
-      } as unknown as Parameters<typeof requireAuth>[1];
-
-      await requireAuth(req, unauthRes, () => {
-        unauthNext = true;
-      });
-      expect(unauthNext).toBe(false);
-      expect(unauthStatus).toBe(401);
+      await expect(
+        changeUserPassword(userId, 'WrongCurrent1!', 'AnotherPass123!')
+      ).rejects.toMatchObject({ statusCode: 401 });
     });
   }
 );

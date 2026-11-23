@@ -8,12 +8,19 @@ var __export = (target, all) => {
 import "dotenv/config";
 import cookieParser from "cookie-parser";
 import express from "express";
-import fs from "fs";
+import fs2 from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { ZodError } from "zod";
 
 // src/db/index.ts
+import fs from "fs";
+import {
+  AuthTypes,
+  Connector,
+  GoogleAuth,
+  IpAddressTypes
+} from "@google-cloud/cloud-sql-connector";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 
@@ -432,28 +439,28 @@ function mapDatabaseError(error, options) {
   if (code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "ETIMEDOUT" || code === "ECONNRESET" || code === "EHOSTUNREACH" || code === "ENETUNREACH" || code === "ENOENT" || code === "57P01" || code === "57P03" || lowerMsg.includes("connection terminated") || lowerMsg.includes("timeout exceeded when trying to connect")) {
     return new AppError(
       503,
-      "Database service is unavailable. Verify your Neon DATABASE_URL connection settings and network access.",
+      "Cloud SQL database is unavailable. Verify CLOUD_SQL_CONNECTION_NAME / SQL_HOST, network access, and SSL configuration.",
       { cause: error }
     );
   }
   if (code === "28P01" || code === "28000") {
     return new AppError(
       503,
-      "Database authentication failed. Check the credentials in DATABASE_URL.",
+      "Database authentication failed. Check SQL_USER and SQL_PASSWORD in server environment variables.",
       { cause: error }
     );
   }
   if (code === "3D000") {
     return new AppError(
       503,
-      "Configured database does not exist. Verify DATABASE_URL.",
+      "Configured database does not exist. Verify SQL_DB_NAME in server environment variables.",
       { cause: error }
     );
   }
   if (code === "42P01") {
     return new AppError(
       503,
-      "Database tables are not initialized. Push the schema to the configured PostgreSQL database.",
+      "Database tables are not initialized. Push the schema to the configured Cloud SQL database.",
       { cause: error }
     );
   }
@@ -461,71 +468,254 @@ function mapDatabaseError(error, options) {
 }
 
 // src/db/index.ts
-function getDatabaseUrl() {
-  const url = process.env.DATABASE_URL?.trim();
-  return url || void 0;
+function readEnv(key) {
+  const val = process.env[key]?.trim();
+  return val || void 0;
 }
-function getDatabaseConfigurationError() {
-  const connectionString = getDatabaseUrl();
-  if (!connectionString) {
-    return "Database connection is not configured. Set DATABASE_URL to your Neon PostgreSQL connection string in environment variables.";
+function normalizePem(raw) {
+  return raw.replace(/\\n/g, "\n").trim();
+}
+function getCloudSqlConnectionName() {
+  return readEnv("CLOUD_SQL_CONNECTION_NAME") ?? readEnv("SQL_INSTANCE_CONNECTION_NAME");
+}
+function resolveConnectorIpType() {
+  const raw = readEnv("CLOUD_SQL_IP_TYPE")?.toUpperCase();
+  switch (raw) {
+    case "PRIVATE":
+      return IpAddressTypes.PRIVATE;
+    case "PSC":
+      return IpAddressTypes.PSC;
+    case "SQL_DATA":
+      return IpAddressTypes.SQL_DATA;
+    default:
+      return IpAddressTypes.PUBLIC;
   }
+}
+function parseServiceAccountCredentials(rawJson) {
   let parsed;
   try {
-    parsed = new URL(connectionString);
+    parsed = JSON.parse(rawJson);
   } catch {
-    return "DATABASE_URL is not a valid PostgreSQL connection URL.";
+    throw new Error("GCP_SERVICE_ACCOUNT_KEY is not valid JSON.");
   }
-  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
-    return "DATABASE_URL must use the postgres:// or postgresql:// protocol.";
+  if (!parsed || typeof parsed !== "object" || typeof parsed.client_email !== "string" || typeof parsed.private_key !== "string") {
+    throw new Error(
+      'GCP_SERVICE_ACCOUNT_KEY must include valid service account "client_email" and "private_key" fields.'
+    );
+  }
+  const record = { ...parsed };
+  record.private_key = normalizePem(String(record.private_key));
+  return record;
+}
+function isUnixSocketHost(host) {
+  return Boolean(host && host.startsWith("/"));
+}
+function getDatabaseConfigurationError() {
+  const connectionName = getCloudSqlConnectionName();
+  const sqlHost = readEnv("SQL_HOST");
+  const sqlUser = readEnv("SQL_USER");
+  const sqlPassword = readEnv("SQL_PASSWORD");
+  const sqlDbName = readEnv("SQL_DB_NAME");
+  const missingCreds = [];
+  if (!sqlUser) missingCreds.push("SQL_USER");
+  if (!sqlPassword) missingCreds.push("SQL_PASSWORD");
+  if (!sqlDbName) missingCreds.push("SQL_DB_NAME");
+  if (!connectionName && !sqlHost) {
+    missingCreds.unshift("CLOUD_SQL_CONNECTION_NAME (or SQL_HOST)");
+    return `Cloud SQL database is not configured. Missing server environment variables: ${missingCreds.join(", ")}.`;
+  }
+  if (missingCreds.length > 0) {
+    return `Cloud SQL database configuration is incomplete. Missing server environment variables: ${missingCreds.join(", ")}.`;
+  }
+  if (connectionName) {
+    if (!/^[^:\s]+:[^:\s]+:[^:\s]+$/.test(connectionName)) {
+      return 'CLOUD_SQL_CONNECTION_NAME must use the format "<project-id>:<region>:<instance-name>".';
+    }
+    const saJson = readEnv("GCP_SERVICE_ACCOUNT_KEY");
+    if (saJson) {
+      try {
+        parseServiceAccountCredentials(saJson);
+      } catch (err) {
+        return err instanceof Error ? err.message : "GCP_SERVICE_ACCOUNT_KEY is invalid.";
+      }
+    }
+    return null;
+  }
+  if (isUnixSocketHost(sqlHost)) {
+    if (process.env.VERCEL || !fs.existsSync(sqlHost)) {
+      return `Cloud SQL Auth Proxy Unix socket (${sqlHost}) is not reachable in this runtime. Run inside Google AI Studio / Cloud Run with the mounted socket, or configure CLOUD_SQL_CONNECTION_NAME (with Application Default Credentials or GCP_SERVICE_ACCOUNT_KEY) or Public IP + SQL_SSL_CA.`;
+    }
+    return null;
+  }
+  const rawPort = readEnv("SQL_PORT");
+  if (rawPort) {
+    const port = Number(rawPort);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return "SQL_PORT must be a valid TCP port between 1 and 65535.";
+    }
   }
   return null;
 }
 function assertDatabaseConfigured() {
-  const configError = getDatabaseConfigurationError();
-  if (configError) {
-    throw new AppError(503, configError);
+  const error = getDatabaseConfigurationError();
+  if (error) {
+    throw new AppError(503, error);
   }
 }
-function resolveSslConfig(connectionString) {
-  if (!connectionString) return void 0;
-  let parsed;
-  try {
-    parsed = new URL(connectionString);
-  } catch {
-    return { rejectUnauthorized: true };
-  }
-  const sslMode = parsed.searchParams.get("sslmode")?.trim().toLowerCase();
-  const hostname = parsed.hostname.toLowerCase();
-  const isLocalHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-  if (sslMode === "disable" || isLocalHost && !sslMode) {
+function resolveTcpSslConfig(host) {
+  if (!host || isUnixSocketHost(host)) {
     return void 0;
   }
-  if (sslMode === "no-verify") {
-    return { rejectUnauthorized: false };
+  const lower = host.toLowerCase();
+  if (lower === "localhost" || lower === "127.0.0.1" || lower === "::1") {
+    const explicitMode = readEnv("SQL_SSL_MODE")?.toLowerCase();
+    if (!explicitMode || explicitMode === "disable") {
+      return void 0;
+    }
   }
-  return { rejectUnauthorized: true };
+  const sslMode = readEnv("SQL_SSL_MODE")?.toLowerCase();
+  if (sslMode === "disable") {
+    return void 0;
+  }
+  const ca = readEnv("SQL_SSL_CA");
+  const cert = readEnv("SQL_SSL_CERT");
+  const key = readEnv("SQL_SSL_KEY");
+  if (sslMode === "no-verify") {
+    return {
+      rejectUnauthorized: false,
+      ...ca ? { ca: normalizePem(ca) } : {},
+      ...cert ? { cert: normalizePem(cert) } : {},
+      ...key ? { key: normalizePem(key) } : {}
+    };
+  }
+  return {
+    rejectUnauthorized: true,
+    ...ca ? { ca: normalizePem(ca) } : {},
+    ...cert ? { cert: normalizePem(cert) } : {},
+    ...key ? { key: normalizePem(key) } : {}
+  };
+}
+function computePoolConfigKey() {
+  return JSON.stringify({
+    connectionName: getCloudSqlConnectionName() ?? null,
+    ipType: readEnv("CLOUD_SQL_IP_TYPE") ?? "PUBLIC",
+    hasSaKey: Boolean(readEnv("GCP_SERVICE_ACCOUNT_KEY")),
+    host: readEnv("SQL_HOST") ?? null,
+    port: readEnv("SQL_PORT") ?? "5432",
+    user: readEnv("SQL_USER") ?? null,
+    db: readEnv("SQL_DB_NAME") ?? null,
+    sslMode: readEnv("SQL_SSL_MODE") ?? null,
+    hasCa: Boolean(readEnv("SQL_SSL_CA")),
+    vercel: Boolean(process.env.VERCEL)
+  });
+}
+function buildDirectObjectPoolConfig() {
+  const sqlHost = readEnv("SQL_HOST");
+  const rawPort = readEnv("SQL_PORT");
+  const port = rawPort ? Number(rawPort) : 5432;
+  return {
+    host: sqlHost ?? "127.0.0.1",
+    ...!isUnixSocketHost(sqlHost) ? { port } : {},
+    user: readEnv("SQL_USER") ?? "unconfigured",
+    password: readEnv("SQL_PASSWORD") ?? "unconfigured",
+    database: readEnv("SQL_DB_NAME") ?? "unconfigured",
+    ssl: resolveTcpSslConfig(sqlHost),
+    max: process.env.VERCEL ? 5 : 10,
+    idleTimeoutMillis: 2e4,
+    connectionTimeoutMillis: 15e3
+  };
+}
+function attachPoolErrorHandler(pool) {
+  pool.on("error", (err) => {
+    console.error("Unexpected error on idle Cloud SQL pool client:", err);
+  });
 }
 var createPool = () => {
-  const connectionString = getDatabaseUrl();
-  if (!global._postgresPool || global._postgresPoolUrl !== connectionString) {
-    const pool2 = new Pool({
-      connectionString: connectionString ?? "postgresql://unconfigured:unconfigured@127.0.0.1:5432/unconfigured",
-      ssl: resolveSslConfig(connectionString),
-      max: process.env.VERCEL ? 5 : 10,
-      idleTimeoutMillis: 2e4,
-      connectionTimeoutMillis: 15e3
-    });
-    pool2.on("error", (err) => {
-      console.error("Unexpected error on idle PostgreSQL pool client:", err);
-    });
-    global._postgresPool = pool2;
-    global._postgresPoolUrl = connectionString;
+  const key = computePoolConfigKey();
+  if (!global._postgresPool || global._postgresPoolKey !== key) {
+    const pool = new Pool(buildDirectObjectPoolConfig());
+    attachPoolErrorHandler(pool);
+    global._postgresPool = pool;
+    global._postgresPoolKey = key;
+    global._drizzleDb = drizzle(pool, { schema: schema_exports });
   }
   return global._postgresPool;
 };
-var pool = createPool();
-var db = drizzle(pool, { schema: schema_exports });
+async function ensureDatabaseReady() {
+  assertDatabaseConfigured();
+  const key = computePoolConfigKey();
+  const connectionName = getCloudSqlConnectionName();
+  if (!connectionName) {
+    return createPool();
+  }
+  if (global._postgresPool && global._postgresPoolKey === key) {
+    return global._postgresPool;
+  }
+  if (!global._cloudSqlInitPromise) {
+    global._cloudSqlInitPromise = (async () => {
+      try {
+        const saJson = readEnv("GCP_SERVICE_ACCOUNT_KEY");
+        const auth = saJson ? new GoogleAuth({
+          credentials: parseServiceAccountCredentials(saJson),
+          scopes: [
+            "https://www.googleapis.com/auth/sqlservice.admin",
+            "https://www.googleapis.com/auth/cloud-platform"
+          ]
+        }) : void 0;
+        if (!global._cloudSqlConnector) {
+          global._cloudSqlConnector = new Connector(auth ? { auth } : void 0);
+        }
+        const connectorOpts = await global._cloudSqlConnector.getOptions({
+          instanceConnectionName: connectionName,
+          ipType: resolveConnectorIpType(),
+          authType: AuthTypes.PASSWORD
+        });
+        const pool = new Pool({
+          ...connectorOpts,
+          user: readEnv("SQL_USER"),
+          password: readEnv("SQL_PASSWORD"),
+          database: readEnv("SQL_DB_NAME"),
+          max: process.env.VERCEL ? 5 : 10,
+          idleTimeoutMillis: 2e4,
+          connectionTimeoutMillis: 15e3
+        });
+        attachPoolErrorHandler(pool);
+        global._postgresPool = pool;
+        global._postgresPoolKey = key;
+        global._drizzleDb = drizzle(pool, { schema: schema_exports });
+        return pool;
+      } catch (err) {
+        global._cloudSqlInitPromise = void 0;
+        throw new AppError(
+          503,
+          "Unable to initialize Google Cloud SQL Connector. Verify CLOUD_SQL_CONNECTION_NAME, GCP_SERVICE_ACCOUNT_KEY permissions (roles/cloudsql.client), and instance network configuration.",
+          { cause: err }
+        );
+      }
+    })();
+  }
+  return global._cloudSqlInitPromise;
+}
+function getActiveDb() {
+  if (!global._drizzleDb || global._postgresPoolKey !== computePoolConfigKey()) {
+    if (!getCloudSqlConnectionName()) {
+      createPool();
+    } else if (!global._drizzleDb) {
+      createPool();
+    }
+  }
+  return global._drizzleDb;
+}
+if (!getCloudSqlConnectionName()) {
+  createPool();
+}
+var db = new Proxy({}, {
+  get(_target, prop, receiver) {
+    const active = getActiveDb();
+    const value = Reflect.get(active, prop, receiver);
+    return typeof value === "function" ? value.bind(active) : value;
+  }
+});
 
 // firebase-applet-config.json
 var firebase_applet_config_default = {
@@ -542,47 +732,13 @@ var firebase_applet_config_default = {
 };
 
 // src/lib/firebase-admin.ts
-import { cert, getApp, getApps, initializeApp } from "firebase-admin/app";
+import { getApp, getApps, initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
-function resolveProjectId() {
-  return process.env.FIREBASE_PROJECT_ID?.trim() || process.env.VITE_FIREBASE_PROJECT_ID?.trim() || firebase_applet_config_default.projectId?.trim() || void 0;
-}
-function resolveServiceAccountCredential() {
-  const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.trim();
-  if (rawJson) {
-    try {
-      const parsed = JSON.parse(rawJson);
-      const privateKey2 = (parsed.private_key ?? parsed.privateKey)?.replace(/\\n/g, "\n");
-      const clientEmail2 = parsed.client_email ?? parsed.clientEmail;
-      const projectId3 = parsed.project_id ?? parsed.projectId ?? resolveProjectId();
-      if (projectId3 && clientEmail2 && privateKey2) {
-        return { projectId: projectId3, clientEmail: clientEmail2, privateKey: privateKey2 };
-      }
-    } catch (error) {
-      console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT_KEY JSON:", error);
-    }
-  }
-  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL?.trim();
-  const privateKey = process.env.FIREBASE_PRIVATE_KEY?.trim().replace(/\\n/g, "\n");
-  const projectId2 = resolveProjectId();
-  if (projectId2 && clientEmail && privateKey) {
-    return { projectId: projectId2, clientEmail, privateKey };
-  }
-  return null;
-}
+var projectId = firebase_applet_config_default.projectId?.trim() || void 0;
 function isFirebaseAdminConfigured() {
-  return Boolean(resolveProjectId());
+  return Boolean(projectId);
 }
-var projectId = resolveProjectId();
-var serviceAccount = resolveServiceAccountCredential();
-var adminApp = getApps().length ? getApp() : initializeApp(
-  serviceAccount ? {
-    credential: cert(serviceAccount),
-    projectId: serviceAccount.projectId ?? projectId
-  } : {
-    projectId
-  }
-);
+var adminApp = getApps().length ? getApp() : initializeApp(projectId ? { projectId } : {});
 var adminAuth = getAuth(adminApp);
 
 // src/lib/validations.ts
@@ -672,7 +828,7 @@ var forgotPasswordSchema = z.object({
   email: z.string().trim().email("Valid email address is required").toLowerCase()
 });
 var resetPasswordSchema = z.object({
-  oobCode: z.string().trim().min(6, "Reset code is invalid"),
+  token: z.string().trim().min(16, "Reset token is invalid"),
   password: strongPasswordSchema,
   confirmPassword: z.string().min(1, "Please confirm your password")
 }).refine((data) => data.password === data.confirmPassword, {
@@ -690,7 +846,8 @@ var changePasswordSchema = z.object({
 
 // src/server/services/auth.ts
 import crypto2 from "crypto";
-import { and as and5, eq as eq6, gt as gt2 } from "drizzle-orm";
+import bcrypt from "bcryptjs";
+import { and as and5, eq as eq6, gt as gt2, isNull } from "drizzle-orm";
 
 // src/server/services/team.ts
 import crypto from "crypto";
@@ -1470,7 +1627,7 @@ async function syncFirebaseUserWithExecutor(executor, input) {
 }
 async function syncFirebaseUser(input) {
   try {
-    assertDatabaseConfigured();
+    await ensureDatabaseReady();
     return await db.transaction(async (tx) => syncFirebaseUserWithExecutor(tx, input));
   } catch (error) {
     if (error instanceof AppError) throw error;
@@ -1489,7 +1646,7 @@ async function syncFirebaseUser(input) {
 }
 async function updateUserSettings(userId, data) {
   try {
-    assertDatabaseConfigured();
+    await ensureDatabaseReady();
     const updatePayload = {
       updatedAt: /* @__PURE__ */ new Date()
     };
@@ -1515,7 +1672,7 @@ async function updateUserSettings(userId, data) {
 }
 async function updateUserAvatar(userId, avatarDataUri) {
   try {
-    assertDatabaseConfigured();
+    await ensureDatabaseReady();
     const [updated] = await db.update(users).set({
       avatar: avatarDataUri,
       updatedAt: /* @__PURE__ */ new Date()
@@ -1535,6 +1692,7 @@ async function updateUserAvatar(userId, avatarDataUri) {
 
 // src/server/services/auth.ts
 var SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+var BCRYPT_ROUNDS = 12;
 var SESSION_COOKIE_NAME = "devtrack_session";
 function hashToken(rawToken) {
   return crypto2.createHash("sha256").update(rawToken).digest("hex");
@@ -1544,7 +1702,7 @@ function generateSecureToken() {
 }
 async function createSessionRecord(userId, userAgent, executor = db) {
   try {
-    assertDatabaseConfigured();
+    await ensureDatabaseReady();
     const rawToken = generateSecureToken();
     const tokenHash = hashToken(rawToken);
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
@@ -1565,7 +1723,7 @@ async function createSessionRecord(userId, userAgent, executor = db) {
 }
 async function getUserBySessionToken(rawToken) {
   try {
-    assertDatabaseConfigured();
+    await ensureDatabaseReady();
     const tokenHash = hashToken(rawToken);
     const rows = await db.select({ user: users }).from(sessions).innerJoin(users, eq6(sessions.userId, users.id)).where(and5(eq6(sessions.tokenHash, tokenHash), gt2(sessions.expiresAt, /* @__PURE__ */ new Date()))).limit(1);
     if (rows.length === 0) return null;
@@ -1580,7 +1738,7 @@ async function getUserBySessionToken(rawToken) {
 }
 async function deleteSessionByToken(rawToken) {
   try {
-    assertDatabaseConfigured();
+    await ensureDatabaseReady();
     const tokenHash = hashToken(rawToken);
     await db.delete(sessions).where(eq6(sessions.tokenHash, tokenHash));
   } catch (error) {
@@ -1591,17 +1749,89 @@ async function deleteSessionByToken(rawToken) {
     throw new AppError(500, "Failed to sign out cleanly.", { cause: error });
   }
 }
+async function registerWithEmail(input) {
+  const cleanEmail = input.email.trim().toLowerCase();
+  const cleanName = input.name.trim();
+  try {
+    await ensureDatabaseReady();
+    const existing = await db.select({ id: users.id }).from(users).where(eq6(users.email, cleanEmail)).limit(1);
+    if (existing.length > 0) {
+      throw new AppError(409, "An account with this email address already exists.");
+    }
+    const passwordHash = await bcrypt.hash(input.password, BCRYPT_ROUNDS);
+    const localUid = `local_${crypto2.randomUUID()}`;
+    const { user, sessionToken } = await db.transaction(async (tx) => {
+      const [inserted] = await tx.insert(users).values({
+        uid: localUid,
+        name: cleanName,
+        email: cleanEmail,
+        passwordHash,
+        emailVerifiedAt: null,
+        avatar: null
+      }).returning();
+      await syncPendingInvitationNotificationsForUser(tx, inserted.id);
+      const token = await createSessionRecord(inserted.id, input.userAgent, tx);
+      return { user: sanitizeUser(inserted), sessionToken: token };
+    });
+    return {
+      user,
+      requiresVerification: false,
+      message: "Account created successfully.",
+      sessionToken
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error, {
+      duplicateMessage: "An account with this email address already exists."
+    });
+    if (mapped) throw mapped;
+    console.error("Email registration failed:", error);
+    throw new AppError(500, "Failed to create account.", { cause: error });
+  }
+}
+async function loginWithEmail(input) {
+  const cleanEmail = input.email.trim().toLowerCase();
+  try {
+    await ensureDatabaseReady();
+    const [existing] = await db.select().from(users).where(eq6(users.email, cleanEmail)).limit(1);
+    if (!existing) {
+      throw new AppError(401, "Invalid email address or password.");
+    }
+    if (!existing.passwordHash) {
+      throw new AppError(
+        401,
+        "This account uses Google Sign-In. Continue with Google, then set a password in Settings if you also want email login."
+      );
+    }
+    const valid = await bcrypt.compare(input.password, existing.passwordHash);
+    if (!valid) {
+      throw new AppError(401, "Invalid email address or password.");
+    }
+    await syncPendingInvitationNotificationsForUser(db, existing.id);
+    const sessionToken = await createSessionRecord(existing.id, input.userAgent);
+    return {
+      user: sanitizeUser(existing),
+      sessionToken
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
+    console.error("Email login failed:", error);
+    throw new AppError(500, "Failed to sign in.", { cause: error });
+  }
+}
 async function syncAuthenticatedFirebaseUser(decoded, options) {
   try {
-    assertDatabaseConfigured();
-    const provider = decoded.firebase?.sign_in_provider ?? "firebase";
+    await ensureDatabaseReady();
+    const provider = decoded.firebase?.sign_in_provider ?? "google";
     const { user, isNewUser } = await syncFirebaseUser({
       uid: decoded.uid,
       email: decoded.email ?? null,
       emailVerified: Boolean(decoded.email_verified),
       name: options?.name?.trim() || decoded.name || null,
       avatar: decoded.picture ?? null,
-      provider
+      provider: provider === "google.com" ? "google" : provider
     });
     await syncPendingInvitationNotificationsForUser(db, user.id);
     const sessionToken = await createSessionRecord(user.id, options?.userAgent);
@@ -1619,11 +1849,96 @@ async function syncAuthenticatedFirebaseUser(decoded, options) {
     });
   }
 }
+async function changeUserPassword(userId, currentPassword, newPassword) {
+  try {
+    await ensureDatabaseReady();
+    const [existing] = await db.select().from(users).where(eq6(users.id, userId)).limit(1);
+    if (!existing) {
+      throw new AppError(404, "User account not found.");
+    }
+    if (existing.passwordHash) {
+      if (!currentPassword) {
+        throw new AppError(400, "Current password is required.");
+      }
+      const matches = await bcrypt.compare(currentPassword, existing.passwordHash);
+      if (!matches) {
+        throw new AppError(401, "Current password is incorrect.");
+      }
+    }
+    const nextHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    await db.update(users).set({
+      passwordHash: nextHash,
+      updatedAt: /* @__PURE__ */ new Date()
+    }).where(eq6(users.id, userId));
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
+    console.error("Failed to change password:", error);
+    throw new AppError(500, "Failed to update password.", { cause: error });
+  }
+}
+async function requestPasswordReset(email) {
+  const cleanEmail = email.trim().toLowerCase();
+  try {
+    await ensureDatabaseReady();
+    await db.select({ id: users.id }).from(users).where(eq6(users.email, cleanEmail)).limit(1);
+    return {
+      emailConfigured: false,
+      sent: false,
+      message: "Password reset email delivery is not configured on this server. If you signed up with Google, sign in with Google and set or update your password in Settings."
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
+    console.error("Password reset request failed:", error);
+    throw new AppError(500, "Unable to process password reset request.", { cause: error });
+  }
+}
+async function resetPasswordWithToken(rawToken, newPassword) {
+  try {
+    await ensureDatabaseReady();
+    const tokenHash = hashToken(rawToken.trim());
+    const now = /* @__PURE__ */ new Date();
+    const [record] = await db.select().from(passwordResetTokens).where(
+      and5(
+        eq6(passwordResetTokens.tokenHash, tokenHash),
+        isNull(passwordResetTokens.usedAt),
+        gt2(passwordResetTokens.expiresAt, now)
+      )
+    ).limit(1);
+    if (!record) {
+      throw new AppError(400, "This password reset token is invalid or has expired.");
+    }
+    const nextHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    await db.transaction(async (tx) => {
+      const [consumed] = await tx.update(passwordResetTokens).set({ usedAt: now }).where(
+        and5(
+          eq6(passwordResetTokens.id, record.id),
+          isNull(passwordResetTokens.usedAt)
+        )
+      ).returning({ id: passwordResetTokens.id });
+      if (!consumed) {
+        throw new AppError(400, "This password reset token has already been used.");
+      }
+      await tx.update(users).set({ passwordHash: nextHash, updatedAt: now }).where(eq6(users.id, record.userId));
+      await tx.delete(sessions).where(eq6(sessions.userId, record.userId));
+    });
+    return { success: true };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
+    console.error("Failed to reset password with token:", error);
+    throw new AppError(500, "Failed to reset password.", { cause: error });
+  }
+}
 
 // src/server/middleware/auth.ts
 var requireAuth = async (req, res, next) => {
   try {
-    assertDatabaseConfigured();
+    await ensureDatabaseReady();
   } catch (error) {
     next(error);
     return;
@@ -1645,13 +1960,14 @@ var requireAuth = async (req, res, next) => {
     }
     try {
       req.firebaseUser = decoded;
+      const provider = decoded.firebase?.sign_in_provider ?? "google";
       const { user, isNewUser } = await syncFirebaseUser({
         uid: decoded.uid,
         email: decoded.email ?? null,
         emailVerified: Boolean(decoded.email_verified),
         name: decoded.name ?? null,
         avatar: decoded.picture ?? null,
-        provider: decoded.firebase?.sign_in_provider ?? "firebase"
+        provider: provider === "google.com" ? "google" : provider
       });
       if (isNewUser) {
         await syncPendingInvitationNotificationsForUser(db, user.id);
@@ -2859,10 +3175,9 @@ function detectImageMimeType(buf) {
 var __filename = fileURLToPath(import.meta.url);
 var __dirname = path.dirname(__filename);
 function isGoogleOAuthConfigured() {
-  const apiKey = process.env.VITE_FIREBASE_API_KEY?.trim() || firebase_applet_config_default.apiKey;
-  const authDomain = process.env.VITE_FIREBASE_AUTH_DOMAIN?.trim() || firebase_applet_config_default.authDomain;
-  const projectId2 = process.env.FIREBASE_PROJECT_ID?.trim() || process.env.VITE_FIREBASE_PROJECT_ID?.trim() || firebase_applet_config_default.projectId;
-  return Boolean(apiKey && authDomain && projectId2);
+  return Boolean(
+    firebase_applet_config_default.apiKey && firebase_applet_config_default.authDomain && firebase_applet_config_default.projectId
+  );
 }
 var app = express();
 app.set("trust proxy", 1);
@@ -2925,6 +3240,7 @@ function extractFirebaseToken(req) {
   return "";
 }
 var handleFirebaseSessionSync = asyncHandler(async (req, res) => {
+  await ensureDatabaseReady();
   if (!isFirebaseAdminConfigured()) {
     res.status(503).json({
       error: "Firebase Authentication is not configured on this server."
@@ -2952,6 +3268,13 @@ var handleFirebaseSessionSync = asyncHandler(async (req, res) => {
   setSessionCookie(res, req, result.sessionToken);
   res.json({ user: result.user });
 });
+app.use("/api", (req, _res, next) => {
+  if (req.path === "/health" || req.path === "/auth/config" || req.path === "/auth/logout") {
+    next();
+    return;
+  }
+  ensureDatabaseReady().then(() => next(), next);
+});
 app.get("/api/health", (_req, res) => {
   const dbError = getDatabaseConfigurationError();
   res.json({
@@ -2965,11 +3288,59 @@ app.get("/api/auth/config", (_req, res) => {
   res.json({
     firebaseConfigured: isFirebaseAdminConfigured(),
     googleConfigured: isGoogleOAuthConfigured(),
+    emailConfigured: false,
     emailVerificationEnforced: false
   });
 });
-app.post("/api/auth/session", handleFirebaseSessionSync);
+app.post(
+  "/api/auth/register",
+  asyncHandler(async (req, res) => {
+    const parsed = registerSchema.parse(req.body);
+    const result = await registerWithEmail({
+      name: parsed.name,
+      email: parsed.email,
+      password: parsed.password,
+      userAgent: req.get("user-agent")
+    });
+    setSessionCookie(res, req, result.sessionToken);
+    res.status(201).json({
+      user: result.user,
+      requiresVerification: result.requiresVerification,
+      message: result.message
+    });
+  })
+);
+app.post(
+  "/api/auth/login",
+  asyncHandler(async (req, res) => {
+    const parsed = loginSchema.parse(req.body);
+    const result = await loginWithEmail({
+      email: parsed.email,
+      password: parsed.password,
+      userAgent: req.get("user-agent")
+    });
+    setSessionCookie(res, req, result.sessionToken);
+    res.json({ user: result.user });
+  })
+);
 app.post("/api/auth/google", handleFirebaseSessionSync);
+app.post("/api/auth/session", handleFirebaseSessionSync);
+app.post(
+  "/api/auth/forgot-password",
+  asyncHandler(async (req, res) => {
+    const parsed = forgotPasswordSchema.parse(req.body);
+    const result = await requestPasswordReset(parsed.email);
+    res.json(result);
+  })
+);
+app.post(
+  "/api/auth/reset-password",
+  asyncHandler(async (req, res) => {
+    const parsed = resetPasswordSchema.parse(req.body);
+    const result = await resetPasswordWithToken(parsed.token, parsed.password);
+    res.json(result);
+  })
+);
 app.post(
   "/api/auth/logout",
   asyncHandler(async (req, res) => {
@@ -2995,6 +3366,19 @@ app.patch(
     const parsed = updateUserSettingsSchema.parse(req.body);
     const updated = await updateUserSettings(req.dbUser.id, parsed);
     res.json({ user: updated });
+  })
+);
+app.patch(
+  "/api/me/password",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const parsed = changePasswordSchema.parse(req.body);
+    await changeUserPassword(
+      req.dbUser.id,
+      parsed.currentPassword,
+      parsed.newPassword
+    );
+    res.json({ success: true });
   })
 );
 app.post(
@@ -3377,7 +3761,7 @@ async function startServer() {
     app.use(express.static(distDir));
     app.get("*", (_req, res) => {
       const indexFile = path.join(distDir, "index.html");
-      if (fs.existsSync(indexFile)) {
+      if (fs2.existsSync(indexFile)) {
         res.sendFile(indexFile);
       } else {
         res.status(404).send("Build artifacts not found.");

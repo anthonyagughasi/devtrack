@@ -131,7 +131,7 @@ export function AuthViews({
     registerWithEmail,
     signInWithGoogle,
     requestPasswordReset,
-    confirmPasswordResetWithCode,
+    resetPasswordWithToken,
   } = useAuth();
   const { showToast } = useToast();
   const [googleLoading, setGoogleLoading] = useState(false);
@@ -216,8 +216,8 @@ export function AuthViews({
 
           {route === 'reset-password' && (
             <ResetPasswordCard
-              oobCode={initialToken}
-              onConfirmReset={confirmPasswordResetWithCode}
+              token={initialToken}
+              onConfirmReset={resetPasswordWithToken}
               onNavigate={onNavigate}
             />
           )}
@@ -594,7 +594,7 @@ function ForgotPasswordCard({
           Reset your password
         </h1>
         <p className="text-xs text-neutral-400 mt-1.5">
-          Enter your email address and Firebase Authentication will send you a password reset link.
+          Enter your account email address to check password reset availability.
         </p>
       </div>
 
@@ -609,8 +609,8 @@ function ForgotPasswordCard({
       )}
 
       {successMsg && (
-        <div className="rounded-lg border border-emerald-900/70 bg-emerald-950/40 p-3 text-xs text-emerald-300 flex items-start gap-2">
-          <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+        <div className="rounded-lg border border-blue-900/70 bg-blue-950/40 p-3 text-xs text-blue-200 flex items-start gap-2">
+          <CheckCircle2 className="h-4 w-4 text-blue-400 shrink-0 mt-0.5" />
           <span>{successMsg}</span>
         </div>
       )}
@@ -637,7 +637,7 @@ function ForgotPasswordCard({
         </div>
 
         <Button type="submit" className="w-full h-10" loading={submitting}>
-          Send Reset Instructions
+          Continue
         </Button>
       </form>
 
@@ -655,12 +655,16 @@ function ForgotPasswordCard({
 }
 
 function ResetPasswordCard({
-  oobCode,
+  token,
   onConfirmReset,
   onNavigate,
 }: {
-  oobCode?: string;
-  onConfirmReset: (oobCode: string, newPassword: string) => Promise<void>;
+  token?: string;
+  onConfirmReset: (
+    token: string,
+    password: string,
+    confirmPassword: string
+  ) => Promise<void>;
   onNavigate: (next: AuthRoute) => void;
 }) {
   const [submitting, setSubmitting] = useState(false);
@@ -676,7 +680,7 @@ function ResetPasswordCard({
     defaultValues: { password: '', confirmPassword: '' },
   });
 
-  if (!oobCode) {
+  if (!token) {
     return (
       <div className="space-y-5 text-center">
         <AlertCircle className="h-9 w-9 text-amber-400 mx-auto" />
@@ -685,14 +689,14 @@ function ResetPasswordCard({
             Invalid reset link
           </h1>
           <p className="text-xs text-neutral-400 mt-2">
-            This password reset link is missing a valid reset code. Please request a new reset link.
+            This password reset link is missing a valid token. Please sign in with Google or return to login.
           </p>
         </div>
         <Button
-          onClick={() => onNavigate('forgot-password')}
+          onClick={() => onNavigate('login')}
           className="w-full h-10"
         >
-          Request New Reset Link
+          Back to Sign In
         </Button>
       </div>
     );
@@ -721,7 +725,7 @@ function ResetPasswordCard({
     setSubmitting(true);
     setErrorMsg(null);
     try {
-      await onConfirmReset(oobCode, values.password);
+      await onConfirmReset(token, values.password, values.confirmPassword);
       setCompleted(true);
     } catch (err) {
       setErrorMsg(
@@ -756,10 +760,10 @@ function ResetPasswordCard({
           </div>
           <button
             type="button"
-            onClick={() => onNavigate('forgot-password')}
+            onClick={() => onNavigate('login')}
             className="text-blue-400 hover:underline font-medium pl-6 cursor-pointer block"
           >
-            Request a fresh reset link
+            Back to sign in
           </button>
         </div>
       )}

@@ -45,13 +45,14 @@ export const requireAuth = async (
 
     try {
       req.firebaseUser = decoded;
+      const provider = decoded.firebase?.sign_in_provider ?? 'google';
       const { user, isNewUser } = await syncFirebaseUser({
         uid: decoded.uid,
         email: decoded.email ?? null,
         emailVerified: Boolean(decoded.email_verified),
         name: decoded.name ?? null,
         avatar: decoded.picture ?? null,
-        provider: decoded.firebase?.sign_in_provider ?? 'firebase',
+        provider: provider === 'google.com' ? 'google' : provider,
       });
       if (isNewUser) {
         await syncPendingInvitationNotificationsForUser(db, user.id);

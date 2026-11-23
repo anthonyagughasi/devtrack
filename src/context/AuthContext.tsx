@@ -7,23 +7,24 @@ import React, {
   useState,
 } from 'react';
 import {
-  confirmPasswordReset,
-  createUserWithEmailAndPassword,
   onAuthStateChanged,
-  sendPasswordResetEmail,
-  signInWithEmailAndPassword,
   signInWithPopup,
   signOut as firebaseSignOut,
-  updateProfile,
   type User as FirebaseUser,
 } from 'firebase/auth';
-import { auth, googleAuthProvider, isFirebaseClientConfigured } from '../lib/firebase';
+import {
+  auth,
+  googleAuthProvider,
+  isFirebaseClientConfigured,
+  recordUserFirestoreSync,
+} from '../lib/firebase';
 import { ApiError, apiFetch } from '../lib/api';
 import type { UserProfile } from '../types/app';
 
 export interface AuthConfig {
   firebaseConfigured: boolean;
   googleConfigured: boolean;
+  emailConfigured: boolean;
   emailVerificationEnforced: boolean;
 }
 
@@ -48,7 +49,7 @@ interface AuthContextValue {
     confirmPassword: string;
   }) => Promise<RegisterResult>;
   requestPasswordReset: (email: string) => Promise<string>;
-  confirmPasswordResetWithCode: (oobCode: string, newPassword: string) => Promise<void>;
+  resetPasswordWithToken: (token: string, password: string, confirmPassword: string) => Promise<void>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   applyTheme: (theme: 'dark' | 'light') => void;
@@ -93,18 +94,6 @@ export function mapFirebaseAuthError(error: unknown, fallback: string): string {
       : '';
 
   switch (code) {
-    case 'auth/email-already-in-use':
-      return 'An account with this email address already exists.';
-    case 'auth/invalid-credential':
-    case 'auth/wrong-password':
-    case 'auth/user-not-found':
-      return 'Invalid email address or password.';
-    case 'auth/invalid-email':
-      return 'Please enter a valid email address.';
-    case 'auth/weak-password':
-      return 'Password does not meet minimum security requirements.';
-    case 'auth/too-many-requests':
-      return 'Too many attempts. Please wait a moment and try again.';
     case 'auth/popup-closed-by-user':
       return 'Google sign-in popup was closed before completing.';
     case 'auth/popup-blocked':
@@ -112,13 +101,7 @@ export function mapFirebaseAuthError(error: unknown, fallback: string): string {
     case 'auth/account-exists-with-different-credential':
       return 'An account already exists with this email using a different sign-in method.';
     case 'auth/operation-not-allowed':
-      return 'This sign-in method is not enabled in Firebase Authentication yet.';
-    case 'auth/expired-action-code':
-      return 'This password reset link has expired. Please request a new one.';
-    case 'auth/invalid-action-code':
-      return 'This password reset link is invalid or has already been used.';
-    case 'auth/requires-recent-login':
-      return 'Please sign in again before changing your password.';
+      return 'Google Sign-In is not enabled in Firebase Authentication yet.';
     default:
       return error instanceof Error && error.message ? error.message : fallback;
   }
@@ -132,6 +115,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [authConfig, setAuthConfig] = useState<AuthConfig>({
     firebaseConfigured: isFirebaseClientConfigured(),
     googleConfigured: isFirebaseClientConfigured(),
+    emailConfigured: false,
     emailVerificationEnforced: false,
   });
 
@@ -145,7 +129,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const syncInFlightRef = useRef<Promise<void> | null>(null);
-  const firebaseSyncInFlightRef = useRef<Promise<UserProfile | null> | null>(null);
+  const googleSyncInFlightRef = useRef<Promise<UserProfile | null> | null>(null);
   const initializedRef = useRef(false);
   const signingOutRef = useRef(false);
 
@@ -185,32 +169,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [applyTheme]
   );
 
-  const syncFirebaseSession = useCallback(
+  const syncGoogleSession = useCallback(
     async (
       user: FirebaseUser,
-      options?: { name?: string; forceTokenRefresh?: boolean; throwOnError?: boolean }
+      options?: { forceTokenRefresh?: boolean; throwOnError?: boolean }
     ): Promise<UserProfile | null> => {
-      if (firebaseSyncInFlightRef.current && !options?.throwOnError) {
-        return firebaseSyncInFlightRef.current;
+      if (googleSyncInFlightRef.current && !options?.throwOnError) {
+        return googleSyncInFlightRef.current;
       }
 
       const promise = (async () => {
         try {
           const idToken = await user.getIdToken(Boolean(options?.forceTokenRefresh));
-          const data = await apiFetch<{ user: UserProfile }>('/api/auth/session', {
+          const data = await apiFetch<{ user: UserProfile }>('/api/auth/google', {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${idToken}`,
             },
-            body: JSON.stringify({
-              idToken,
-              ...(options?.name ? { name: options.name } : {}),
-            }),
+            body: JSON.stringify({ idToken }),
           });
           markSessionHint();
           setProfile(data.user);
           applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
           setAuthError(null);
+          void recordUserFirestoreSync(user, 'active');
           return data.user;
         } catch (err) {
           if (options?.throwOnError) {
@@ -224,11 +206,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           }
           return null;
         } finally {
-          firebaseSyncInFlightRef.current = null;
+          googleSyncInFlightRef.current = null;
         }
       })();
 
-      firebaseSyncInFlightRef.current = promise;
+      googleSyncInFlightRef.current = promise;
       return promise;
     },
     [applyTheme, syncProfile]
@@ -248,7 +230,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         await auth.authStateReady();
       } catch {
-        // Continue with session check if Firebase readiness fails
+        // Continue with cookie session check if Firebase readiness fails
       }
 
       if (!active) return;
@@ -257,7 +239,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setFirebaseUser(currentUser);
 
       if (currentUser && !signingOutRef.current) {
-        await syncFirebaseSession(currentUser);
+        await syncGoogleSession(currentUser);
       } else if (hasSessionHint()) {
         await syncProfile(true);
       } else {
@@ -279,7 +261,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setFirebaseUser(user);
       if (!initializedRef.current) return;
       if (user && !signingOutRef.current) {
-        await syncFirebaseSession(user);
+        await syncGoogleSession(user);
       }
     });
 
@@ -287,7 +269,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       active = false;
       unsub();
     };
-  }, [syncProfile, syncFirebaseSession, applyTheme]);
+  }, [syncProfile, syncGoogleSession, applyTheme]);
 
   const signInWithGoogle = useCallback(async () => {
     setAuthError(null);
@@ -300,30 +282,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     try {
       const cred = await signInWithPopup(auth, googleAuthProvider);
-      await syncFirebaseSession(cred.user, { throwOnError: true });
+      await syncGoogleSession(cred.user, { throwOnError: true });
     } catch (err: unknown) {
       const msg = mapFirebaseAuthError(err, 'Google sign-in was cancelled or failed.');
       setAuthError(msg);
       throw new Error(msg);
     }
-  }, [authConfig.googleConfigured, syncFirebaseSession]);
+  }, [authConfig.googleConfigured, syncGoogleSession]);
 
   const loginWithEmail = useCallback(
     async (email: string, password: string): Promise<UserProfile> => {
       setAuthError(null);
-      try {
-        const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
-        const user = await syncFirebaseSession(cred.user, { throwOnError: true });
-        if (!user) {
-          throw new Error('Failed to load workspace profile.');
-        }
-        return user;
-      } catch (err: unknown) {
-        const msg = mapFirebaseAuthError(err, 'Unable to sign in right now.');
-        throw new Error(msg);
-      }
+      const data = await apiFetch<{ user: UserProfile }>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      markSessionHint();
+      setProfile(data.user);
+      applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
+      setAuthError(null);
+      return data.user;
     },
-    [syncFirebaseSession]
+    [applyTheme]
   );
 
   const registerWithEmail = useCallback(
@@ -334,68 +314,38 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       confirmPassword: string;
     }): Promise<RegisterResult> => {
       setAuthError(null);
-      const cleanName = input.name.trim();
-      try {
-        const cred = await createUserWithEmailAndPassword(
-          auth,
-          input.email.trim(),
-          input.password
-        );
-        await updateProfile(cred.user, { displayName: cleanName }).catch(() => undefined);
-
-        try {
-          const user = await syncFirebaseSession(cred.user, {
-            name: cleanName,
-            forceTokenRefresh: true,
-            throwOnError: true,
-          });
-          if (!user) {
-            throw new Error('Failed to initialize workspace profile.');
-          }
-          return {
-            user,
-            requiresVerification: false,
-            message: 'Account created successfully.',
-          };
-        } catch (syncErr) {
-          if (syncErr instanceof ApiError && syncErr.status === 409) {
-            await firebaseSignOut(auth).catch(() => undefined);
-          }
-          throw syncErr;
-        }
-      } catch (err: unknown) {
-        const msg = mapFirebaseAuthError(err, 'Unable to create account.');
-        throw new Error(msg);
-      }
+      const data = await apiFetch<RegisterResult>('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: input.name.trim(),
+          email: input.email.trim(),
+          password: input.password,
+          confirmPassword: input.confirmPassword,
+        }),
+      });
+      markSessionHint();
+      setProfile(data.user);
+      applyTheme(data.user.themePreference === 'light' ? 'light' : 'dark');
+      setAuthError(null);
+      return data;
     },
-    [syncFirebaseSession]
+    [applyTheme]
   );
 
   const requestPasswordReset = useCallback(async (email: string): Promise<string> => {
-    try {
-      await sendPasswordResetEmail(auth, email.trim());
-      return 'If an account exists with that email address, Firebase Authentication has sent password reset instructions.';
-    } catch (err: unknown) {
-      const code =
-        err && typeof err === 'object' && 'code' in err
-          ? String((err as { code?: unknown }).code ?? '')
-          : '';
-      if (code === 'auth/user-not-found') {
-        return 'If an account exists with that email address, Firebase Authentication has sent password reset instructions.';
-      }
-      throw new Error(mapFirebaseAuthError(err, 'Failed to send password reset email.'));
-    }
+    const res = await apiFetch<{ message: string }>('/api/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email: email.trim() }),
+    });
+    return res.message;
   }, []);
 
-  const confirmPasswordResetWithCode = useCallback(
-    async (oobCode: string, newPassword: string): Promise<void> => {
-      try {
-        await confirmPasswordReset(auth, oobCode.trim(), newPassword);
-      } catch (err: unknown) {
-        throw new Error(
-          mapFirebaseAuthError(err, 'Unable to reset password with this link.')
-        );
-      }
+  const resetPasswordWithToken = useCallback(
+    async (token: string, password: string, confirmPassword: string): Promise<void> => {
+      await apiFetch('/api/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify({ token: token.trim(), password, confirmPassword }),
+      });
     },
     []
   );
@@ -435,7 +385,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loginWithEmail,
         registerWithEmail,
         requestPasswordReset,
-        confirmPasswordResetWithCode,
+        resetPasswordWithToken,
         signOut,
         refreshProfile,
         applyTheme,

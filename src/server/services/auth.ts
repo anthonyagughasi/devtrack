@@ -1,5 +1,5 @@
-import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import bcrypt from 'bcryptjs';
 import { and, eq, gt, isNull } from 'drizzle-orm';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { db, ensureDatabaseReady, type Database } from '../../db/index.ts';
@@ -97,13 +97,14 @@ export async function registerWithEmail(input: {
 }): Promise<{
   user: UserRecord;
   requiresVerification: boolean;
-  sessionToken: string;
   message: string;
+  sessionToken: string;
 }> {
+  const cleanEmail = input.email.trim().toLowerCase();
+  const cleanName = input.name.trim();
+
   try {
     await ensureDatabaseReady();
-    const cleanEmail = input.email.trim().toLowerCase();
-    const cleanName = input.name.trim();
 
     const existing = await db
       .select({ id: users.id })
@@ -116,13 +117,13 @@ export async function registerWithEmail(input: {
     }
 
     const passwordHash = await bcrypt.hash(input.password, BCRYPT_ROUNDS);
-    const uid = `local_${crypto.randomUUID()}`;
+    const localUid = `local_${crypto.randomUUID()}`;
 
-    const { created, sessionToken } = await db.transaction(async (tx) => {
+    const { user, sessionToken } = await db.transaction(async (tx) => {
       const [inserted] = await tx
         .insert(users)
         .values({
-          uid,
+          uid: localUid,
           name: cleanName,
           email: cleanEmail,
           passwordHash,
@@ -133,14 +134,14 @@ export async function registerWithEmail(input: {
 
       await syncPendingInvitationNotificationsForUser(tx, inserted.id);
       const token = await createSessionRecord(inserted.id, input.userAgent, tx);
-      return { created: inserted, sessionToken: token };
+      return { user: sanitizeUser(inserted), sessionToken: token };
     });
 
     return {
-      user: sanitizeUser(created),
+      user,
       requiresVerification: false,
-      sessionToken,
       message: 'Account created successfully.',
+      sessionToken,
     };
   } catch (error) {
     if (error instanceof AppError) throw error;
@@ -148,8 +149,8 @@ export async function registerWithEmail(input: {
       duplicateMessage: 'An account with this email address already exists.',
     });
     if (mapped) throw mapped;
-    console.error('Registration failed:', error);
-    throw new AppError(500, 'Unable to create account right now.', { cause: error });
+    console.error('Email registration failed:', error);
+    throw new AppError(500, 'Failed to create account.', { cause: error });
   }
 }
 
@@ -158,38 +159,37 @@ export async function loginWithEmail(input: {
   password: string;
   userAgent?: string;
 }): Promise<{ user: UserRecord; sessionToken: string }> {
+  const cleanEmail = input.email.trim().toLowerCase();
+
   try {
     await ensureDatabaseReady();
-    const cleanEmail = input.email.trim().toLowerCase();
 
-    const rows = await db
+    const [existing] = await db
       .select()
       .from(users)
       .where(eq(users.email, cleanEmail))
       .limit(1);
 
-    if (rows.length === 0) {
+    if (!existing) {
       throw new AppError(401, 'Invalid email address or password.');
     }
 
-    const userRow = rows[0];
-    if (!userRow.passwordHash) {
+    if (!existing.passwordHash) {
       throw new AppError(
         401,
-        'This account uses Google Sign-In. Please continue with Google or set a password in Settings.'
+        'This account uses Google Sign-In. Continue with Google, then set a password in Settings if you also want email login.'
       );
     }
 
-    const valid = await bcrypt.compare(input.password, userRow.passwordHash);
+    const valid = await bcrypt.compare(input.password, existing.passwordHash);
     if (!valid) {
       throw new AppError(401, 'Invalid email address or password.');
     }
 
-    await syncPendingInvitationNotificationsForUser(db, userRow.id);
-    const sessionToken = await createSessionRecord(userRow.id, input.userAgent);
-
+    await syncPendingInvitationNotificationsForUser(db, existing.id);
+    const sessionToken = await createSessionRecord(existing.id, input.userAgent);
     return {
-      user: sanitizeUser(userRow),
+      user: sanitizeUser(existing),
       sessionToken,
     };
   } catch (error) {
@@ -197,7 +197,7 @@ export async function loginWithEmail(input: {
     const mapped = mapDatabaseError(error);
     if (mapped) throw mapped;
     console.error('Email login failed:', error);
-    throw new AppError(500, 'Unable to sign in right now.', { cause: error });
+    throw new AppError(500, 'Failed to sign in.', { cause: error });
   }
 }
 
@@ -214,7 +214,7 @@ export async function syncAuthenticatedFirebaseUser(
       emailVerified: Boolean(decoded.email_verified),
       name: options?.name?.trim() || decoded.name || null,
       avatar: decoded.picture ?? null,
-      provider,
+      provider: provider === 'google.com' ? 'google' : provider,
     });
 
     await syncPendingInvitationNotificationsForUser(db, user.id);
@@ -235,50 +235,42 @@ export async function syncAuthenticatedFirebaseUser(
   }
 }
 
-export async function authenticateWithGoogleToken(
-  decoded: DecodedIdToken,
-  userAgent?: string
-): Promise<{ user: UserRecord; sessionToken: string; isNewUser: boolean }> {
-  return syncAuthenticatedFirebaseUser(decoded, { userAgent });
-}
-
 export async function changeUserPassword(
   userId: number,
   currentPassword: string,
   newPassword: string
-): Promise<{ success: true }> {
+): Promise<void> {
   try {
     await ensureDatabaseReady();
-    const [userRow] = await db
+
+    const [existing] = await db
       .select()
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
 
-    if (!userRow) {
-      throw new AppError(404, 'User not found.');
+    if (!existing) {
+      throw new AppError(404, 'User account not found.');
     }
 
-    if (userRow.passwordHash) {
+    if (existing.passwordHash) {
       if (!currentPassword) {
         throw new AppError(400, 'Current password is required.');
       }
-      const matches = await bcrypt.compare(currentPassword, userRow.passwordHash);
+      const matches = await bcrypt.compare(currentPassword, existing.passwordHash);
       if (!matches) {
         throw new AppError(401, 'Current password is incorrect.');
       }
     }
 
-    const newHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    const nextHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     await db
       .update(users)
       .set({
-        passwordHash: newHash,
+        passwordHash: nextHash,
         updatedAt: new Date(),
       })
       .where(eq(users.id, userId));
-
-    return { success: true };
   } catch (error) {
     if (error instanceof AppError) throw error;
     const mapped = mapDatabaseError(error);
@@ -288,43 +280,83 @@ export async function changeUserPassword(
   }
 }
 
+export async function requestPasswordReset(
+  email: string
+): Promise<{ emailConfigured: boolean; sent: boolean; message: string }> {
+  const cleanEmail = email.trim().toLowerCase();
+  try {
+    await ensureDatabaseReady();
+    // Verify database connectivity cleanly without leaking account existence
+    await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, cleanEmail))
+      .limit(1);
+
+    return {
+      emailConfigured: false,
+      sent: false,
+      message:
+        'Password reset email delivery is not configured on this server. If you signed up with Google, sign in with Google and set or update your password in Settings.',
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    const mapped = mapDatabaseError(error);
+    if (mapped) throw mapped;
+    console.error('Password reset request failed:', error);
+    throw new AppError(500, 'Unable to process password reset request.', { cause: error });
+  }
+}
+
 export async function resetPasswordWithToken(
   rawToken: string,
   newPassword: string
-): Promise<{ success: true }> {
+): Promise<{ success: boolean }> {
   try {
     await ensureDatabaseReady();
     const tokenHash = hashToken(rawToken.trim());
+    const now = new Date();
+
+    const [record] = await db
+      .select()
+      .from(passwordResetTokens)
+      .where(
+        and(
+          eq(passwordResetTokens.tokenHash, tokenHash),
+          isNull(passwordResetTokens.usedAt),
+          gt(passwordResetTokens.expiresAt, now)
+        )
+      )
+      .limit(1);
+
+    if (!record) {
+      throw new AppError(400, 'This password reset token is invalid or has expired.');
+    }
+
+    const nextHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
 
     await db.transaction(async (tx) => {
-      const [tokenRow] = await tx
-        .select()
-        .from(passwordResetTokens)
+      const [consumed] = await tx
+        .update(passwordResetTokens)
+        .set({ usedAt: now })
         .where(
           and(
-            eq(passwordResetTokens.tokenHash, tokenHash),
-            isNull(passwordResetTokens.usedAt),
-            gt(passwordResetTokens.expiresAt, new Date())
+            eq(passwordResetTokens.id, record.id),
+            isNull(passwordResetTokens.usedAt)
           )
         )
-        .limit(1);
+        .returning({ id: passwordResetTokens.id });
 
-      if (!tokenRow) {
-        throw new AppError(400, 'This password reset token is invalid or has expired.');
+      if (!consumed) {
+        throw new AppError(400, 'This password reset token has already been used.');
       }
 
-      const newHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
       await tx
         .update(users)
-        .set({ passwordHash: newHash, updatedAt: new Date() })
-        .where(eq(users.id, tokenRow.userId));
+        .set({ passwordHash: nextHash, updatedAt: now })
+        .where(eq(users.id, record.userId));
 
-      await tx
-        .update(passwordResetTokens)
-        .set({ usedAt: new Date() })
-        .where(eq(passwordResetTokens.id, tokenRow.id));
-
-      await tx.delete(sessions).where(eq(sessions.userId, tokenRow.userId));
+      await tx.delete(sessions).where(eq(sessions.userId, record.userId));
     });
 
     return { success: true };
@@ -332,7 +364,7 @@ export async function resetPasswordWithToken(
     if (error instanceof AppError) throw error;
     const mapped = mapDatabaseError(error);
     if (mapped) throw mapped;
-    console.error('Failed to reset password:', error);
+    console.error('Failed to reset password with token:', error);
     throw new AppError(500, 'Failed to reset password.', { cause: error });
   }
 }

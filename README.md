@@ -6,8 +6,8 @@ Project management and team collaboration platform built for software engineerin
 
 - **Frontend**: React 19, TypeScript (`strict: true`), Tailwind CSS v4, Lucide React, Recharts, React Hook Form, Zod, `@dnd-kit`
 - **Backend**: Express + Vite full-stack server (`server.ts`) and Vercel serverless handler (`api/index.mjs`)
-- **Database**: **Neon PostgreSQL** via **Drizzle ORM** (`src/db/schema.ts`, `src/db/index.ts`, configured via `DATABASE_URL`)
-- **Authentication**: **Firebase Authentication** (Email/Password registration & login, Google OAuth, Password Reset) with server-side ID token verification (`firebase-admin`) and persistent session sync
+- **Database**: **Google Cloud SQL (PostgreSQL)** via **Drizzle ORM** (`src/db/schema.ts`, `src/db/index.ts`) using AI Studio's Cloud SQL Auth Proxy socket (`SQL_HOST`, `SQL_USER`, `SQL_PASSWORD`, `SQL_DB_NAME`) or `@google-cloud/cloud-sql-connector` with Application Default Credentials
+- **Authentication**: Email/password registration & login (`bcryptjs` + PostgreSQL sessions) and **Firebase Authentication** (`firebase-applet-config.json`, Google Sign-In with `adminAuth.verifyIdToken` verification and Firestore `user_sync`)
 
 ## Core Capabilities
 
@@ -23,7 +23,7 @@ Project management and team collaboration platform built for software engineerin
 - `npm run dev` — Run the full-stack Express + Vite server on port `3000`
 - `npm run build` — Build frontend bundle (`dist/`), server bundle (`server.js`), and Vercel API bundle (`api/_server.mjs`)
 - `npm run start` — Run production server (`node server.js`)
-- `npm run db:push` — Push Drizzle PostgreSQL schema to Neon (`DATABASE_URL`)
+- `npm run db:push` — Push Drizzle PostgreSQL schema to Cloud SQL
 - `npm run db:generate` — Generate Drizzle SQL migrations
 - `npm run lint` — TypeScript strict type-checking (`tsc --noEmit`)
 - `npm run test` — Run automated Vitest suite (`vitest run`)
