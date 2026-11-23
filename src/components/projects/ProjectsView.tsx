@@ -10,9 +10,15 @@ import {
   Trash2,
   Users,
 } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
+import { formatClientError } from '../../lib/firebase';
 import { cn, formatDate } from '../../lib/utils';
+import {
+  deleteProject,
+  listUserProjects,
+  updateProject,
+} from '../../services/projects';
 import type { ProjectSummary } from '../../types/app';
 import { Avatar } from '../ui/Avatar';
 import { Button } from '../ui/Button';
@@ -23,7 +29,7 @@ import { ProjectStatusText } from '../ui/StatusText';
 import { ProjectFormModal } from './ProjectFormModal';
 
 interface ProjectsViewProps {
-  onSelectProject: (projectId: number) => void;
+  onSelectProject: (projectId: string) => void;
   onNewProject: () => void;
   refreshTrigger: number;
   onDataChanged: () => void;
@@ -44,6 +50,7 @@ export function ProjectsView({
   refreshTrigger,
   onDataChanged,
 }: ProjectsViewProps) {
+  const { profile } = useAuth();
   const { showToast } = useToast();
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -54,33 +61,30 @@ export function ProjectsView({
   const [deleting, setDeleting] = useState(false);
 
   const loadProjects = useCallback(async () => {
+    if (!profile) return;
     setLoading(true);
     try {
-      const params = new URLSearchParams();
-      if (search.trim()) params.set('q', search.trim());
-      if (statusFilter !== 'ALL') params.set('status', statusFilter);
-      const data = await apiFetch<{ projects: ProjectSummary[] }>(
-        `/api/projects?${params.toString()}`
-      );
-      setProjects(data.projects);
+      const list = await listUserProjects(profile.uid, {
+        q: search.trim() || undefined,
+        status: statusFilter !== 'ALL' ? statusFilter : undefined,
+      });
+      setProjects(list);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to load projects.', 'error');
+      showToast(formatClientError(err, 'Failed to load projects.'), 'error');
     } finally {
       setLoading(false);
     }
-  }, [search, statusFilter, showToast]);
+  }, [profile, search, statusFilter, showToast]);
 
   useEffect(() => {
     loadProjects();
   }, [loadProjects, refreshTrigger]);
 
   const handleArchive = async (project: ProjectSummary) => {
+    if (!profile) return;
     try {
       const nextStatus = project.status === 'ARCHIVED' ? 'ACTIVE' : 'ARCHIVED';
-      await apiFetch(`/api/projects/${project.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ status: nextStatus }),
-      });
+      await updateProject(profile, project.id, { status: nextStatus });
       showToast(
         nextStatus === 'ARCHIVED' ? 'Project archived.' : 'Project restored.',
         'success'
@@ -88,21 +92,21 @@ export function ProjectsView({
       loadProjects();
       onDataChanged();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to update project.', 'error');
+      showToast(formatClientError(err, 'Failed to update project.'), 'error');
     }
   };
 
   const handleDelete = async () => {
-    if (!deletingProject) return;
+    if (!deletingProject || !profile) return;
     setDeleting(true);
     try {
-      await apiFetch(`/api/projects/${deletingProject.id}`, { method: 'DELETE' });
+      await deleteProject(profile, deletingProject.id);
       showToast('Project deleted.', 'success');
       setDeletingProject(null);
       loadProjects();
       onDataChanged();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to delete project.', 'error');
+      showToast(formatClientError(err, 'Failed to delete project.'), 'error');
     } finally {
       setDeleting(false);
     }

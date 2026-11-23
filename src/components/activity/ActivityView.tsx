@@ -1,8 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Activity, ChevronLeft, ChevronRight } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
+import { formatClientError } from '../../lib/firebase';
 import { formatDate, formatRelativeTime } from '../../lib/utils';
+import { listWorkspaceActivity } from '../../services/activity';
+import { listUserProjects } from '../../services/projects';
 import type { ActivityItem, ProjectSummary } from '../../types/app';
 import { Avatar } from '../ui/Avatar';
 import { Button } from '../ui/Button';
@@ -10,11 +13,12 @@ import { EmptyState } from '../ui/EmptyState';
 import { Skeleton } from '../ui/Skeleton';
 
 interface ActivityViewProps {
-  onOpenProject: (projectId: number) => void;
+  onOpenProject: (projectId: string) => void;
   refreshTrigger: number;
 }
 
 export function ActivityView({ onOpenProject, refreshTrigger }: ActivityViewProps) {
+  const { profile } = useAuth();
   const { showToast } = useToast();
   const [items, setItems] = useState<ActivityItem[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -25,32 +29,27 @@ export function ActivityView({ onOpenProject, refreshTrigger }: ActivityViewProp
   const [loading, setLoading] = useState(true);
 
   const loadActivity = useCallback(async () => {
+    if (!profile) return;
     setLoading(true);
     try {
-      const params = new URLSearchParams();
-      params.set('page', String(page));
-      params.set('limit', '20');
-      if (projectFilter !== 'ALL') params.set('projectId', projectFilter);
-
-      const [actRes, projRes] = await Promise.all([
-        apiFetch<{
-          items: ActivityItem[];
-          total: number;
-          page: number;
-          totalPages: number;
-        }>(`/api/activity?${params.toString()}`),
-        apiFetch<{ projects: ProjectSummary[] }>('/api/projects'),
+      const [actRes, projList] = await Promise.all([
+        listWorkspaceActivity(profile.uid, {
+          projectId: projectFilter !== 'ALL' ? projectFilter : undefined,
+          page,
+          limit: 20,
+        }),
+        listUserProjects(profile.uid),
       ]);
       setItems(actRes.items);
       setTotal(actRes.total);
       setTotalPages(actRes.totalPages);
-      setProjects(projRes.projects);
+      setProjects(projList);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to load activity.', 'error');
+      showToast(formatClientError(err, 'Failed to load activity.'), 'error');
     } finally {
       setLoading(false);
     }
-  }, [page, projectFilter, showToast]);
+  }, [profile, page, projectFilter, showToast]);
 
   useEffect(() => {
     loadActivity();

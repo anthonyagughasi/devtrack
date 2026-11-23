@@ -1,26 +1,27 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Check, Copy, KeyRound, MailPlus, Trash2, Users, X } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
+import { formatClientError } from '../../lib/firebase';
 import { formatDate } from '../../lib/utils';
+import { listUserProjects } from '../../services/projects';
+import {
+  acceptInvitation,
+  declineInvitation,
+  inviteMember,
+  listIncomingInvitations,
+  listWorkspaceTeam,
+  revokeInvitation,
+  type TeamMemberSummary,
+} from '../../services/team';
 import type { InvitationItem, ProjectSummary } from '../../types/app';
 import { Avatar } from '../ui/Avatar';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { Skeleton } from '../ui/Skeleton';
 
-interface TeamMemberSummary {
-  userId: number;
-  name: string;
-  email: string;
-  avatar: string | null;
-  projects: Array<{ projectId: number; projectName: string; role: string; joinedAt: string }>;
-  taskStats: { total: number; completed: number; active: number; overdue: number };
-  activityCount: number;
-}
-
 interface TeamViewProps {
-  onOpenProject: (projectId: number) => void;
+  onOpenProject: (projectId: string) => void;
   refreshTrigger: number;
   onDataChanged: () => void;
 }
@@ -30,6 +31,7 @@ export function TeamView({
   refreshTrigger,
   onDataChanged,
 }: TeamViewProps) {
+  const { profile } = useAuth();
   const { showToast } = useToast();
   const [members, setMembers] = useState<TeamMemberSummary[]>([]);
   const [outgoingInvites, setOutgoingInvites] = useState<InvitationItem[]>([]);
@@ -51,29 +53,30 @@ export function TeamView({
   const [decliningToken, setDecliningToken] = useState(false);
 
   const loadTeam = useCallback(async () => {
+    if (!profile) return;
     setLoading(true);
     try {
-      const [teamRes, incomingRes, projectsRes] = await Promise.all([
-        apiFetch<{ members: TeamMemberSummary[]; invitations: InvitationItem[] }>('/api/team'),
-        apiFetch<{ invitations: InvitationItem[] }>('/api/invitations/mine'),
-        apiFetch<{ projects: ProjectSummary[] }>('/api/projects'),
+      const [teamRes, incomingList, projectsList] = await Promise.all([
+        listWorkspaceTeam(profile.uid),
+        listIncomingInvitations(profile.email),
+        listUserProjects(profile.uid),
       ]);
       setMembers(teamRes.members);
       setOutgoingInvites(teamRes.invitations);
-      setIncomingInvites(incomingRes.invitations);
-      const manageable = projectsRes.projects.filter(
+      setIncomingInvites(incomingList);
+      const manageable = projectsList.filter(
         (p) => p.role === 'OWNER' || p.role === 'ADMINISTRATOR'
       );
       setProjects(manageable);
       if (manageable.length > 0 && !inviteProjectId) {
-        setInviteProjectId(String(manageable[0].id));
+        setInviteProjectId(manageable[0].id);
       }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to load team data.', 'error');
+      showToast(formatClientError(err, 'Failed to load team data.'), 'error');
     } finally {
       setLoading(false);
     }
-  }, [showToast, inviteProjectId]);
+  }, [profile, showToast, inviteProjectId]);
 
   useEffect(() => {
     loadTeam();
@@ -81,24 +84,18 @@ export function TeamView({
 
   const handleSendInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inviteProjectId || !inviteEmail.trim()) return;
+    if (!profile || !inviteProjectId || !inviteEmail.trim()) return;
     setSendingInvite(true);
     setInviteFeedback(null);
     const recipient = inviteEmail.trim();
     try {
-      const res = await apiFetch<{
-        invitation: InvitationItem;
-      }>(`/api/projects/${inviteProjectId}/invitations`, {
-        method: 'POST',
-        body: JSON.stringify({ email: recipient, role: inviteRole }),
+      await inviteMember(profile, inviteProjectId, {
+        email: recipient,
+        role: inviteRole,
       });
 
-      if (!res || !res.invitation) {
-        throw new Error('Failed to create invitation.');
-      }
-
       const statusText =
-        "Invitation created. It will appear in the recipient's DevTrack account when they register or sign in.";
+        "Invitation created. It will appear in the recipient's DevTrack account when they sign in with that email, or you can copy the invite token below.";
 
       setInviteFeedback({ type: 'success', text: statusText });
       showToast(statusText, 'success');
@@ -106,8 +103,7 @@ export function TeamView({
       loadTeam();
       onDataChanged();
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'Failed to create invitation.';
+      const msg = formatClientError(err, 'Failed to create invitation.');
       setInviteFeedback({ type: 'error', text: msg });
       showToast(msg, 'error');
     } finally {
@@ -116,48 +112,45 @@ export function TeamView({
   };
 
   const handleAcceptInvite = async (token: string) => {
+    if (!profile) return;
     setAcceptingToken(true);
     try {
-      const res = await apiFetch<{ projectId: number }>('/api/invitations/accept', {
-        method: 'POST',
-        body: JSON.stringify({ token }),
-      });
+      const res = await acceptInvitation(profile, token);
       showToast('Invitation accepted. You joined the project.', 'success');
       setTokenInput('');
       loadTeam();
       onDataChanged();
       onOpenProject(res.projectId);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to accept invitation.', 'error');
+      showToast(formatClientError(err, 'Failed to accept invitation.'), 'error');
     } finally {
       setAcceptingToken(false);
     }
   };
 
   const handleDeclineInvite = async (token: string) => {
+    if (!profile) return;
     setDecliningToken(true);
     try {
-      await apiFetch<{ invitation: InvitationItem }>('/api/invitations/decline', {
-        method: 'POST',
-        body: JSON.stringify({ token }),
-      });
+      await declineInvitation(profile, token);
       showToast('Invitation declined.', 'info');
       loadTeam();
       onDataChanged();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to decline invitation.', 'error');
+      showToast(formatClientError(err, 'Failed to decline invitation.'), 'error');
     } finally {
       setDecliningToken(false);
     }
   };
 
-  const handleRevokeInvite = async (id: number) => {
+  const handleRevokeInvite = async (id: string) => {
+    if (!profile) return;
     try {
-      await apiFetch(`/api/invitations/${id}`, { method: 'DELETE' });
+      await revokeInvitation(profile, id);
       showToast('Invitation revoked.', 'success');
       loadTeam();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to revoke invitation.', 'error');
+      showToast(formatClientError(err, 'Failed to revoke invitation.'), 'error');
     }
   };
 

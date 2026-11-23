@@ -35,9 +35,14 @@ function parseAuthLocation(): { route: AuthRoute; token?: string } {
   const params = new URLSearchParams(window.location.search);
   const token = params.get('token')?.trim() || params.get('oobCode')?.trim() || undefined;
   const viewParam = params.get('view')?.trim();
+  const modeParam = params.get('mode')?.trim();
 
   if (pathname in PATH_TO_AUTH_ROUTE) {
     return { route: PATH_TO_AUTH_ROUTE[pathname], token };
+  }
+
+  if (modeParam === 'resetPassword' && token) {
+    return { route: 'reset-password', token };
   }
 
   if (
@@ -63,8 +68,8 @@ function authRouteToPath(route: AuthRoute, token?: string): string {
 function WorkspaceRouter() {
   const { profile, loading, authError, refreshProfile, signOut, clearAuthError } = useAuth();
   const [route, setRoute] = useState<NavRoute>('dashboard');
-  const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
-  const [initialTaskId, setInitialTaskId] = useState<number | undefined>(undefined);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [initialTaskId, setInitialTaskId] = useState<string | undefined>(undefined);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
@@ -107,7 +112,7 @@ function WorkspaceRouter() {
   }, []);
 
   const handleNavigate = useCallback(
-    (nextRoute: NavRoute, projectId?: number, taskId?: number) => {
+    (nextRoute: NavRoute, projectId?: string, taskId?: string) => {
       setRoute(nextRoute);
       if (nextRoute === 'projects' && projectId) {
         setSelectedProjectId(projectId);

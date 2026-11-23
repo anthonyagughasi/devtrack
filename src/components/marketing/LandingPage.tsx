@@ -67,9 +67,11 @@ export function LandingPage({ onNavigateAuth }: LandingPageProps) {
     try {
       await signInWithGoogle();
       showToast('Signed in to DevTrack.', 'success');
-    } catch {
+    } catch (err) {
       showToast(
-        'Sign-in did not complete. Please try again or sign in with email.',
+        err instanceof Error && err.message
+          ? err.message
+          : 'Sign-in did not complete. Please try again or sign in with email.',
         'error'
       );
     } finally {

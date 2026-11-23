@@ -13,7 +13,7 @@ import {
 import { z } from 'zod';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
+import { formatClientError } from '../../lib/firebase';
 import { formatDate, formatRelativeTime, isOverdue } from '../../lib/utils';
 import {
   TASK_PRIORITIES,
@@ -21,6 +21,15 @@ import {
   type TaskPriority,
   type TaskStatus,
 } from '../../lib/validations';
+import {
+  addTaskComment,
+  createTask,
+  deleteTask,
+  deleteTaskComment,
+  getTaskDetails,
+  updateTask,
+  updateTaskComment,
+} from '../../services/tasks';
 import type { ActivityItem, TaskCommentItem, TaskItem } from '../../types/app';
 import { Avatar } from '../ui/Avatar';
 import { Button } from '../ui/Button';
@@ -41,14 +50,14 @@ const taskFormSchema = z.object({
 type TaskFormValues = z.infer<typeof taskFormSchema>;
 
 interface MemberOption {
-  userId: number;
+  userId: string;
   name: string;
   email: string;
   avatar: string | null;
 }
 
 interface ProjectOption {
-  id: number;
+  id: string;
   name: string;
   members?: MemberOption[];
 }
@@ -56,8 +65,8 @@ interface ProjectOption {
 interface TaskModalProps {
   open: boolean;
   onClose: () => void;
-  taskId?: number | null;
-  defaultProjectId?: number;
+  taskId?: string | null;
+  defaultProjectId?: string;
   defaultStatus?: TaskStatus;
   projects?: ProjectOption[];
   members?: MemberOption[];
@@ -89,7 +98,7 @@ export function TaskModal({
 
   const [newComment, setNewComment] = useState('');
   const [postingComment, setPostingComment] = useState(false);
-  const [editingCommentId, setEditingCommentId] = useState<number | null>(null);
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
   const [editingCommentText, setEditingCommentText] = useState('');
 
   const {
@@ -114,17 +123,17 @@ export function TaskModal({
   const selectedProjectId = watch('projectId');
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !profile) return;
 
     if (!taskId) {
       setTaskMeta(null);
       setComments([]);
       setActivities([]);
-      const pId = defaultProjectId ?? (projects[0]?.id || 0);
+      const pId = defaultProjectId ?? projects[0]?.id ?? '';
       const selectedProj = projects.find((p) => p.id === pId);
       setProjectMembers(members.length > 0 ? members : selectedProj?.members ?? []);
       reset({
-        projectId: pId ? String(pId) : '',
+        projectId: pId,
         title: '',
         description: '',
         status: defaultStatus,
@@ -137,12 +146,7 @@ export function TaskModal({
 
     let cancelled = false;
     setLoadingDetails(true);
-    apiFetch<{
-      task: TaskItem;
-      comments: TaskCommentItem[];
-      activities: ActivityItem[];
-      projectMembers: MemberOption[];
-    }>(`/api/tasks/${taskId}`)
+    getTaskDetails(profile.uid, taskId, defaultProjectId)
       .then((data) => {
         if (cancelled) return;
         setTaskMeta(data.task);
@@ -150,7 +154,7 @@ export function TaskModal({
         setActivities(data.activities);
         setProjectMembers(data.projectMembers);
         reset({
-          projectId: String(data.task.projectId),
+          projectId: data.task.projectId,
           title: data.task.title,
           description: data.task.description ?? '',
           status: data.task.status as TaskStatus,
@@ -158,12 +162,12 @@ export function TaskModal({
           dueDate: data.task.dueDate
             ? new Date(data.task.dueDate).toISOString().slice(0, 10)
             : '',
-          assigneeId: data.task.assigneeId ? String(data.task.assigneeId) : '',
+          assigneeId: data.task.assigneeId ?? '',
         });
       })
       .catch((err) => {
         if (!cancelled) {
-          showToast(err instanceof Error ? err.message : 'Failed to load task.', 'error');
+          showToast(formatClientError(err, 'Failed to load task.'), 'error');
           onClose();
         }
       })
@@ -174,11 +178,11 @@ export function TaskModal({
     return () => {
       cancelled = true;
     };
-  }, [open, taskId, defaultProjectId, defaultStatus]);
+  }, [open, taskId, defaultProjectId, defaultStatus, profile]);
 
   useEffect(() => {
     if (!isEdit && projects.length > 0 && selectedProjectId) {
-      const proj = projects.find((p) => p.id === Number(selectedProjectId));
+      const proj = projects.find((p) => p.id === selectedProjectId);
       if (proj?.members) {
         setProjectMembers(proj.members);
       }
@@ -186,52 +190,47 @@ export function TaskModal({
   }, [selectedProjectId, projects, isEdit]);
 
   const onSubmit = async (values: TaskFormValues) => {
+    if (!profile) return;
     setSubmitting(true);
     try {
       const payload = {
-        projectId: Number(values.projectId),
+        projectId: values.projectId,
         title: values.title,
         description: values.description || '',
         status: values.status,
         priority: values.priority,
         dueDate: values.dueDate ? new Date(`${values.dueDate}T12:00:00Z`).toISOString() : null,
-        assigneeId: values.assigneeId ? Number(values.assigneeId) : null,
+        assigneeId: values.assigneeId ? values.assigneeId : null,
       };
 
       if (isEdit && taskId) {
-        await apiFetch(`/api/tasks/${taskId}`, {
-          method: 'PATCH',
-          body: JSON.stringify(payload),
-        });
+        await updateTask(profile, taskId, payload, taskMeta?.projectId ?? defaultProjectId);
         showToast('Task updated.', 'success');
       } else {
-        await apiFetch('/api/tasks', {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        });
+        await createTask(profile, payload);
         showToast('Task created.', 'success');
       }
 
       onSaved();
       onClose();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to save task.', 'error');
+      showToast(formatClientError(err, 'Failed to save task.'), 'error');
     } finally {
       setSubmitting(false);
     }
   };
 
   const handleDeleteTask = async () => {
-    if (!taskId) return;
+    if (!taskId || !profile) return;
     setDeleting(true);
     try {
-      await apiFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+      await deleteTask(profile, taskId, taskMeta?.projectId ?? defaultProjectId);
       showToast('Task deleted.', 'success');
       setConfirmDeleteOpen(false);
       onSaved();
       onClose();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to delete task.', 'error');
+      showToast(formatClientError(err, 'Failed to delete task.'), 'error');
     } finally {
       setDeleting(false);
     }
@@ -239,34 +238,31 @@ export function TaskModal({
 
   const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!taskId || !newComment.trim()) return;
+    if (!taskId || !profile || !newComment.trim()) return;
     setPostingComment(true);
     try {
-      const { comment } = await apiFetch<{ comment: TaskCommentItem }>(
-        `/api/tasks/${taskId}/comments`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ content: newComment.trim() }),
-        }
+      const comment = await addTaskComment(
+        profile,
+        taskId,
+        newComment.trim(),
+        taskMeta?.projectId ?? defaultProjectId
       );
       setComments((prev) => [...prev, comment]);
       setNewComment('');
       showToast('Comment posted.', 'success');
       onSaved();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to post comment.', 'error');
+      showToast(formatClientError(err, 'Failed to post comment.'), 'error');
     } finally {
       setPostingComment(false);
     }
   };
 
-  const handleSaveCommentEdit = async (commentId: number) => {
-    if (!editingCommentText.trim()) return;
+  const handleSaveCommentEdit = async (commentId: string) => {
+    const pId = taskMeta?.projectId ?? defaultProjectId;
+    if (!editingCommentText.trim() || !profile || !taskId || !pId) return;
     try {
-      await apiFetch(`/api/comments/${commentId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ content: editingCommentText.trim() }),
-      });
+      await updateTaskComment(profile, pId, taskId, commentId, editingCommentText.trim());
       setComments((prev) =>
         prev.map((c) =>
           c.id === commentId ? { ...c, content: editingCommentText.trim() } : c
@@ -276,18 +272,20 @@ export function TaskModal({
       setEditingCommentText('');
       showToast('Comment updated.', 'success');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to update comment.', 'error');
+      showToast(formatClientError(err, 'Failed to update comment.'), 'error');
     }
   };
 
-  const handleDeleteComment = async (commentId: number) => {
+  const handleDeleteComment = async (commentId: string) => {
+    const pId = taskMeta?.projectId ?? defaultProjectId;
+    if (!profile || !taskId || !pId) return;
     try {
-      await apiFetch(`/api/comments/${commentId}`, { method: 'DELETE' });
+      await deleteTaskComment(profile, pId, taskId, commentId);
       setComments((prev) => prev.filter((c) => c.id !== commentId));
       showToast('Comment deleted.', 'success');
       onSaved();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to delete comment.', 'error');
+      showToast(formatClientError(err, 'Failed to delete comment.'), 'error');
     }
   };
 

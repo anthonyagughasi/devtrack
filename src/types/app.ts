@@ -1,7 +1,7 @@
 import type { ProjectRole, ProjectStatus, TaskPriority, TaskStatus } from '../lib/validations';
 
 export interface UserProfile {
-  id: number;
+  id: string;
   uid: string;
   name: string;
   email: string;
@@ -19,20 +19,20 @@ export interface UserProfile {
 }
 
 export interface UserSummary {
-  id: number;
+  id: string;
   name: string;
   email: string;
   avatar: string | null;
 }
 
 export interface ProjectSummary {
-  id: number;
+  id: string;
   name: string;
   description: string;
   status: ProjectStatus;
   startDate: string | null;
   deadline: string | null;
-  ownerId: number;
+  ownerId: string;
   createdAt: string;
   updatedAt: string;
   owner: UserSummary;
@@ -43,7 +43,7 @@ export interface ProjectSummary {
   progress: number;
   memberCount: number;
   members: Array<{
-    userId: number;
+    userId: string;
     role: string;
     name: string;
     email: string;
@@ -52,17 +52,17 @@ export interface ProjectSummary {
 }
 
 export interface TaskItem {
-  id: number;
+  id: string;
   title: string;
   description: string;
   status: TaskStatus;
   priority: TaskPriority;
   position: number;
   dueDate: string | null;
-  projectId: number;
+  projectId: string;
   projectName?: string;
-  assigneeId: number | null;
-  createdById: number;
+  assigneeId: string | null;
+  createdById: string;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -72,9 +72,9 @@ export interface TaskItem {
 }
 
 export interface TaskCommentItem {
-  id: number;
-  taskId: number;
-  authorId: number;
+  id: string;
+  taskId: string;
+  authorId: string;
   authorName: string;
   authorEmail: string;
   authorAvatar: string | null;
@@ -84,14 +84,14 @@ export interface TaskCommentItem {
 }
 
 export interface ActivityItem {
-  id: number;
-  actorId: number;
+  id: string;
+  actorId: string;
   actorName: string;
   actorEmail?: string;
   actorAvatar: string | null;
-  projectId?: number | null;
+  projectId?: string | null;
   projectName?: string | null;
-  taskId?: number | null;
+  taskId?: string | null;
   action: string;
   resourceType?: string;
   resourceName?: string;
@@ -100,8 +100,8 @@ export interface ActivityItem {
 }
 
 export interface ProjectMemberItem {
-  id: number;
-  userId: number;
+  id: string;
+  userId: string;
   role: ProjectRole;
   joinedAt: string;
   name: string;
@@ -110,8 +110,8 @@ export interface ProjectMemberItem {
 }
 
 export interface InvitationItem {
-  id: number;
-  projectId: number;
+  id: string;
+  projectId: string;
   projectName?: string;
   email: string;
   role: ProjectRole;
@@ -123,8 +123,9 @@ export interface InvitationItem {
 }
 
 export interface NotificationItem {
-  id: number;
-  userId: number;
+  id: string;
+  userId: string;
+  projectId?: string;
   type: string;
   title: string;
   message: string;
@@ -145,7 +146,7 @@ export interface DashboardAnalytics {
   tasksByStatus: Array<{ name: string; status: string; count: number }>;
   tasksByPriority: Array<{ name: string; priority: string; count: number }>;
   projectProgress: Array<{
-    id: number;
+    id: string;
     name: string;
     fullName: string;
     status: string;
@@ -160,7 +161,7 @@ export interface DashboardAnalytics {
     created: number;
   }>;
   teamWorkload: Array<{
-    userId: number;
+    userId: string;
     name: string;
     email: string;
     avatar: string | null;
@@ -171,34 +172,34 @@ export interface DashboardAnalytics {
   }>;
   recentActivity: ActivityItem[];
   myTasks: Array<{
-    id: number;
+    id: string;
     title: string;
     status: TaskStatus;
     priority: TaskPriority;
     dueDate: string | null;
-    projectId: number;
+    projectId: string;
     projectName: string;
   }>;
   upcomingDeadlines: Array<{
-    id: number;
+    id: string;
     title: string;
     status: TaskStatus;
     priority: TaskPriority;
     dueDate: string | null;
-    projectId: number;
+    projectId: string;
     projectName: string;
   }>;
   overdueTaskList: Array<{
-    id: number;
+    id: string;
     title: string;
     status: TaskStatus;
     priority: TaskPriority;
     dueDate: string | null;
-    projectId: number;
+    projectId: string;
     projectName: string;
   }>;
   activeProjects: Array<{
-    id: number;
+    id: string;
     name: string;
     status: ProjectStatus;
     deadline: string | null;

@@ -8,16 +8,19 @@ import {
   Plus,
   Search,
 } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
+import { formatClientError } from '../../lib/firebase';
 import { cn, formatDate, isOverdue } from '../../lib/utils';
 import type { TaskStatus } from '../../lib/validations';
+import { listUserProjects } from '../../services/projects';
+import { listUserTasks, updateTask } from '../../services/tasks';
 import type { ProjectSummary, TaskItem } from '../../types/app';
 import { Avatar } from '../ui/Avatar';
 import { Button } from '../ui/Button';
 import { EmptyState } from '../ui/EmptyState';
 import { Skeleton } from '../ui/Skeleton';
-import { TaskPriorityText, TaskStatusText } from '../ui/StatusText';
+import { TaskPriorityText } from '../ui/StatusText';
 import { KanbanBoard } from './KanbanBoard';
 import { TaskModal } from './TaskModal';
 
@@ -32,6 +35,7 @@ export function TasksView({
   refreshTrigger,
   onDataChanged,
 }: TasksViewProps) {
+  const { profile } = useAuth();
   const { showToast } = useToast();
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -46,32 +50,44 @@ export function TasksView({
   const [sortBy, setSortBy] = useState('position');
 
   const [modalOpen, setModalOpen] = useState(false);
-  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskProjectId, setSelectedTaskProjectId] = useState<string | undefined>(
+    undefined
+  );
   const [defaultStatus, setDefaultStatus] = useState<TaskStatus>('TODO');
 
   const loadData = useCallback(async () => {
+    if (!profile) return;
     setLoading(true);
     try {
-      const params = new URLSearchParams();
-      if (projectFilter !== 'ALL') params.set('projectId', projectFilter);
-      if (statusFilter !== 'ALL') params.set('status', statusFilter);
-      if (priorityFilter !== 'ALL') params.set('priority', priorityFilter);
-      if (assigneeFilter !== 'ALL') params.set('assignee', assigneeFilter);
-      if (search.trim()) params.set('q', search.trim());
-      params.set('sort', sortBy);
-
-      const [tasksRes, projectsRes] = await Promise.all([
-        apiFetch<{ tasks: TaskItem[] }>(`/api/tasks?${params.toString()}`),
-        apiFetch<{ projects: ProjectSummary[] }>('/api/projects'),
+      const [tasksList, projectsList] = await Promise.all([
+        listUserTasks(profile.uid, {
+          projectId: projectFilter !== 'ALL' ? projectFilter : undefined,
+          status: statusFilter !== 'ALL' ? statusFilter : undefined,
+          priority: priorityFilter !== 'ALL' ? priorityFilter : undefined,
+          assignee: assigneeFilter !== 'ALL' ? assigneeFilter : undefined,
+          q: search.trim() || undefined,
+          sort: sortBy,
+        }),
+        listUserProjects(profile.uid),
       ]);
-      setTasks(tasksRes.tasks);
-      setProjects(projectsRes.projects);
+      setTasks(tasksList);
+      setProjects(projectsList);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to load tasks.', 'error');
+      showToast(formatClientError(err, 'Failed to load tasks.'), 'error');
     } finally {
       setLoading(false);
     }
-  }, [projectFilter, statusFilter, priorityFilter, assigneeFilter, search, sortBy, showToast]);
+  }, [
+    profile,
+    projectFilter,
+    statusFilter,
+    priorityFilter,
+    assigneeFilter,
+    search,
+    sortBy,
+    showToast,
+  ]);
 
   useEffect(() => {
     loadData();
@@ -84,21 +100,26 @@ export function TasksView({
       return;
     }
     setSelectedTaskId(null);
+    setSelectedTaskProjectId(
+      projectFilter !== 'ALL' ? projectFilter : projects[0]?.id
+    );
     setDefaultStatus(status);
     setModalOpen(true);
   };
 
-  const handleStatusQuickChange = async (taskId: number, status: TaskStatus) => {
+  const handleStatusQuickChange = async (
+    taskId: string,
+    projectId: string,
+    status: TaskStatus
+  ) => {
+    if (!profile) return;
     try {
-      await apiFetch(`/api/tasks/${taskId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ status }),
-      });
+      await updateTask(profile, taskId, { status }, projectId);
       showToast('Task status updated.', 'success');
       loadData();
       onDataChanged();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to update task.', 'error');
+      showToast(formatClientError(err, 'Failed to update task.'), 'error');
     }
   };
 
@@ -257,7 +278,9 @@ export function TasksView({
             onDataChanged();
           }}
           onSelectTask={(id) => {
+            const matched = tasks.find((t) => t.id === id);
             setSelectedTaskId(id);
+            setSelectedTaskProjectId(matched?.projectId);
             setModalOpen(true);
           }}
           onAddTask={(status) => handleOpenCreate(status)}
@@ -301,6 +324,7 @@ export function TasksView({
                         type="button"
                         onClick={() => {
                           setSelectedTaskId(task.id);
+                          setSelectedTaskProjectId(task.projectId);
                           setModalOpen(true);
                         }}
                         className="font-medium text-neutral-900 dark:text-neutral-100 hover:text-blue-600 dark:hover:text-blue-400 text-left cursor-pointer"
@@ -315,7 +339,11 @@ export function TasksView({
                       <select
                         value={task.status}
                         onChange={(e) =>
-                          handleStatusQuickChange(task.id, e.target.value as TaskStatus)
+                          handleStatusQuickChange(
+                            task.id,
+                            task.projectId,
+                            e.target.value as TaskStatus
+                          )
                         }
                         aria-label={`Change status for ${task.title}`}
                         className="h-7 rounded border border-neutral-200 dark:border-neutral-800 bg-transparent px-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -376,7 +404,8 @@ export function TasksView({
         onClose={() => setModalOpen(false)}
         taskId={selectedTaskId}
         defaultProjectId={
-          projectFilter !== 'ALL' ? Number(projectFilter) : projects[0]?.id
+          selectedTaskProjectId ??
+          (projectFilter !== 'ALL' ? projectFilter : projects[0]?.id)
         }
         defaultStatus={defaultStatus}
         projects={projects}

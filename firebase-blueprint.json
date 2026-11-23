@@ -1,35 +1,268 @@
 {
   "entities": {
-    "UserSync": {
-      "title": "UserSync",
-      "description": "Per-user workspace Firestore connectivity and sync state record stored in DevTrack's dedicated Firestore database.",
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Private user account profile and workspace preferences strictly isolated to the owning user.",
       "type": "object",
       "properties": {
-        "uid": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "avatar": { "type": "string", "maxLength": 350000 },
+        "role": { "type": "string", "enum": ["USER"], "maxLength": 16 },
+        "hasPassword": { "type": "boolean" },
+        "themePreference": { "type": "string", "enum": ["dark", "light"], "maxLength": 16 },
+        "notifyOnAssign": { "type": "boolean" },
+        "notifyOnComment": { "type": "boolean" },
+        "notifyOnInvite": { "type": "boolean" },
+        "notifyOnDeadline": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "uid",
+        "name",
+        "email",
+        "role",
+        "hasPassword",
+        "themePreference",
+        "notifyOnAssign",
+        "notifyOnComment",
+        "notifyOnInvite",
+        "notifyOnDeadline",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserProjectRef": {
+      "title": "UserProjectRef",
+      "description": "Per-user project membership index pointing to accessible projects without collection-group indexes.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "enum": ["OWNER", "ADMINISTRATOR", "MEMBER"], "maxLength": 32 },
+        "joinedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "userId", "role", "joinedAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Per-user in-app workspace notification.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": {
           "type": "string",
-          "description": "Authenticated Firebase user UID matching the document ID.",
-          "maxLength": 128,
-          "pattern": "^[a-zA-Z0-9_\\-]+$"
+          "enum": ["TASK_ASSIGNED", "TASK_UPDATED", "TASK_COMMENT", "PROJECT_INVITATION", "DEADLINE_APPROACHING"],
+          "maxLength": 40
         },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "link": { "type": "string", "maxLength": 300 },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "actorId", "projectId", "type", "title", "message", "read", "createdAt"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "Engineering project workspace metadata.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 2000 },
         "status": {
           "type": "string",
-          "enum": ["connected", "active"],
+          "enum": ["PLANNING", "ACTIVE", "ON_HOLD", "COMPLETED", "ARCHIVED"],
           "maxLength": 32
         },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "startDate": { "type": "string", "maxLength": 40 },
+        "deadline": { "type": "string", "maxLength": 40 },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "ownerEmail": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "ownerAvatar": { "type": "string", "maxLength": 350000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "status", "updatedAt"]
+      "required": [
+        "name",
+        "description",
+        "status",
+        "ownerId",
+        "ownerName",
+        "ownerEmail",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ProjectMember": {
+      "title": "ProjectMember",
+      "description": "Authoritative RBAC project membership document keyed by member UID.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "avatar": { "type": "string", "maxLength": 350000 },
+        "role": { "type": "string", "enum": ["OWNER", "ADMINISTRATOR", "MEMBER"], "maxLength": 32 },
+        "inviteToken": { "type": "string", "maxLength": 128 },
+        "joinedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "userId", "name", "email", "role", "joinedAt"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "Project deliverable tracked on Kanban boards and deadline timelines.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "title": { "type": "string", "minLength": 2, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 4000 },
+        "status": { "type": "string", "enum": ["TODO", "IN_PROGRESS", "COMPLETED"], "maxLength": 32 },
+        "priority": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "URGENT"], "maxLength": 32 },
+        "position": { "type": "integer" },
+        "dueDate": { "type": "string", "maxLength": 40 },
+        "assigneeId": { "type": "string", "maxLength": 128 },
+        "createdById": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "completedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "projectId",
+        "projectName",
+        "title",
+        "description",
+        "status",
+        "priority",
+        "position",
+        "createdById",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "TaskComment": {
+      "title": "TaskComment",
+      "description": "Discussion comment on a project task.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "taskId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "authorEmail": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "authorAvatar": { "type": "string", "maxLength": 350000 },
+        "content": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "projectId",
+        "taskId",
+        "authorId",
+        "authorName",
+        "authorEmail",
+        "content",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ActivityEvent": {
+      "title": "ActivityEvent",
+      "description": "Append-only workspace activity audit event scoped to a project.",
+      "type": "object",
+      "properties": {
+        "actorId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "actorName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "actorAvatar": { "type": "string", "maxLength": 350000 },
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "taskId": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "resourceType": { "type": "string", "maxLength": 32 },
+        "resourceName": { "type": "string", "maxLength": 200 },
+        "details": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["actorId", "actorName", "projectId", "projectName", "action", "createdAt"]
+    },
+    "Invitation": {
+      "title": "Invitation",
+      "description": "Single-use email-bound project collaboration invitation keyed by its random token.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "projectOwnerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "minLength": 3, "maxLength": 254 },
+        "role": { "type": "string", "enum": ["ADMINISTRATOR", "MEMBER"], "maxLength": 32 },
+        "token": { "type": "string", "minLength": 32, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "status": { "type": "string", "enum": ["PENDING", "ACCEPTED", "DECLINED", "REVOKED", "EXPIRED"], "maxLength": 32 },
+        "invitedById": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "invitedByName": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "acceptedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "projectId",
+        "projectName",
+        "projectOwnerId",
+        "email",
+        "role",
+        "token",
+        "status",
+        "invitedById",
+        "invitedByName",
+        "expiresAt",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
-    "/user_sync/{userId}": {
-      "schema": {
-        "$ref": "#/entities/UserSync"
-      },
-      "description": "Per-user connectivity and sync status documents strictly isolated to the owning verified user."
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user account profiles and notification/theme preferences."
+    },
+    "/users/{userId}/projectRefs/{projectId}": {
+      "schema": { "$ref": "#/entities/UserProjectRef" },
+      "description": "User-scoped index of projects the user belongs to."
+    },
+    "/users/{userId}/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/Notification" },
+      "description": "User-scoped in-app notifications."
+    },
+    "/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/Project" },
+      "description": "Shared project records protected by project membership."
+    },
+    "/projects/{projectId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/ProjectMember" },
+      "description": "Authoritative project member records and RBAC roles."
+    },
+    "/projects/{projectId}/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/Task" },
+      "description": "Project task deliverables and Kanban ordering."
+    },
+    "/projects/{projectId}/tasks/{taskId}/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/TaskComment" },
+      "description": "Task discussion comments."
+    },
+    "/projects/{projectId}/activities/{activityId}": {
+      "schema": { "$ref": "#/entities/ActivityEvent" },
+      "description": "Chronological project audit trail events."
+    },
+    "/invitations/{token}": {
+      "schema": { "$ref": "#/entities/Invitation" },
+      "description": "Email-bound project invitations keyed by cryptographic token."
     }
   }
 }

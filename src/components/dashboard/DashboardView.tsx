@@ -17,9 +17,12 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
+import { formatClientError } from '../../lib/firebase';
 import { cn, formatDate, formatRelativeTime } from '../../lib/utils';
+import { getDashboardAnalytics } from '../../services/dashboard';
+import { seedStarterWorkspace } from '../../services/projects';
 import type { DashboardAnalytics } from '../../types/app';
 import { Avatar } from '../ui/Avatar';
 import { Button } from '../ui/Button';
@@ -29,7 +32,7 @@ import { ProjectStatusText, TaskPriorityText, TaskStatusText } from '../ui/Statu
 
 interface DashboardViewProps {
   onNewProject: () => void;
-  onOpenProject: (projectId: number, taskId?: number) => void;
+  onOpenProject: (projectId: string, taskId?: string) => void;
   refreshTrigger: number;
   onDataChanged: () => void;
 }
@@ -47,6 +50,7 @@ export function DashboardView({
   refreshTrigger,
   onDataChanged,
 }: DashboardViewProps) {
+  const { profile } = useAuth();
   const { showToast } = useToast();
   const [days, setDays] = useState(14);
   const [data, setData] = useState<DashboardAnalytics | null>(null);
@@ -55,34 +59,36 @@ export function DashboardView({
   const [seeding, setSeeding] = useState(false);
 
   const loadDashboard = useCallback(async () => {
+    if (!profile) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await apiFetch<DashboardAnalytics>(`/api/dashboard?days=${days}`);
+      const res = await getDashboardAnalytics(profile.uid, days);
       setData(res);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to load dashboard.';
+      const msg = formatClientError(err, 'Failed to load dashboard.');
       setError(msg);
       showToast(msg, 'error');
     } finally {
       setLoading(false);
     }
-  }, [days, showToast]);
+  }, [profile, days, showToast]);
 
   useEffect(() => {
     loadDashboard();
   }, [loadDashboard, refreshTrigger]);
 
   const handleSeedStarter = async () => {
+    if (!profile) return;
     setSeeding(true);
     try {
-      await apiFetch('/api/me/seed-workspace', { method: 'POST' });
+      await seedStarterWorkspace(profile);
       showToast('Starter engineering workspace created.', 'success');
       onDataChanged();
       loadDashboard();
     } catch (err) {
       showToast(
-        err instanceof Error ? err.message : 'Failed to create starter workspace.',
+        formatClientError(err, 'Failed to create starter workspace.'),
         'error'
       );
     } finally {

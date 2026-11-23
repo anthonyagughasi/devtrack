@@ -8,12 +8,23 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
+import {
+  EmailAuthProvider,
+  linkWithCredential,
+  reauthenticateWithCredential,
+  updatePassword,
+  updateProfile,
+} from 'firebase/auth';
+import { mapFirebaseAuthError, useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
+import { formatClientError } from '../../lib/firebase';
 import { cn, formatDate } from '../../lib/utils';
 import { strongPasswordSchema } from '../../lib/validations';
-import type { UserProfile } from '../../types/app';
+import {
+  removeUserAvatar,
+  updateUserProfileSettings,
+  uploadUserAvatarFile,
+} from '../../services/users';
 import { Avatar } from '../ui/Avatar';
 import { Button } from '../ui/Button';
 
@@ -21,7 +32,7 @@ const ALLOWED_AVATAR_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 
 export function SettingsView() {
-  const { profile, refreshProfile, applyTheme, signOut } = useAuth();
+  const { firebaseUser, profile, refreshProfile, applyTheme, signOut } = useAuth();
   const { showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -54,7 +65,7 @@ export function SettingsView() {
   const handleAvatarFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
-    if (!file) return;
+    if (!file || !firebaseUser) return;
 
     setAvatarError(null);
     const normalizedType = file.type === 'image/jpg' ? 'image/jpeg' : file.type;
@@ -73,18 +84,11 @@ export function SettingsView() {
 
     setUploadingAvatar(true);
     try {
-      await apiFetch<{ user: UserProfile }>('/api/me/avatar', {
-        method: 'POST',
-        headers: {
-          'Content-Type': normalizedType,
-        },
-        body: file,
-      });
+      await uploadUserAvatarFile(firebaseUser, file);
       await refreshProfile();
       showToast('Profile picture updated.', 'success');
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'Failed to upload profile picture.';
+      const msg = formatClientError(err, 'Failed to upload profile picture.');
       setAvatarError(msg);
       showToast(msg, 'error');
     } finally {
@@ -93,17 +97,15 @@ export function SettingsView() {
   };
 
   const handleRemoveAvatar = async () => {
+    if (!firebaseUser) return;
     setAvatarError(null);
     setRemovingAvatar(true);
     try {
-      await apiFetch<{ user: UserProfile }>('/api/me/avatar', {
-        method: 'DELETE',
-      });
+      await removeUserAvatar(firebaseUser);
       await refreshProfile();
       showToast('Profile picture removed.', 'success');
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'Failed to remove profile picture.';
+      const msg = formatClientError(err, 'Failed to remove profile picture.');
       setAvatarError(msg);
       showToast(msg, 'error');
     } finally {
@@ -113,28 +115,28 @@ export function SettingsView() {
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!firebaseUser) return;
     if (name.trim().length < 2) {
       showToast('Display name must be at least 2 characters.', 'error');
       return;
     }
     setSaving(true);
     try {
-      await apiFetch('/api/me', {
-        method: 'PATCH',
-        body: JSON.stringify({
-          name: name.trim(),
-          themePreference,
-          notifyOnAssign,
-          notifyOnComment,
-          notifyOnInvite,
-          notifyOnDeadline,
-        }),
+      const trimmedName = name.trim();
+      await updateProfile(firebaseUser, { displayName: trimmedName }).catch(() => undefined);
+      await updateUserProfileSettings(firebaseUser, {
+        name: trimmedName,
+        themePreference,
+        notifyOnAssign,
+        notifyOnComment,
+        notifyOnInvite,
+        notifyOnDeadline,
       });
       applyTheme(themePreference);
       await refreshProfile();
       showToast('Preferences saved.', 'success');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to save settings.', 'error');
+      showToast(formatClientError(err, 'Failed to save settings.'), 'error');
     } finally {
       setSaving(false);
     }
@@ -155,18 +157,27 @@ export function SettingsView() {
       showToast('New passwords do not match.', 'error');
       return;
     }
-    if (!profile) return;
+    if (!profile || !firebaseUser || !firebaseUser.email) return;
 
     setSavingPassword(true);
     try {
-      await apiFetch('/api/me/password', {
-        method: 'PATCH',
-        body: JSON.stringify({
-          currentPassword: profile.hasPassword ? currentPassword : '',
-          newPassword,
-          confirmPassword,
-        }),
-      });
+      if (profile.hasPassword) {
+        if (!currentPassword) {
+          showToast('Please enter your current password.', 'error');
+          setSavingPassword(false);
+          return;
+        }
+        const credential = EmailAuthProvider.credential(
+          firebaseUser.email,
+          currentPassword
+        );
+        await reauthenticateWithCredential(firebaseUser, credential);
+        await updatePassword(firebaseUser, newPassword);
+      } else {
+        const credential = EmailAuthProvider.credential(firebaseUser.email, newPassword);
+        await linkWithCredential(firebaseUser, credential);
+        await updateUserProfileSettings(firebaseUser, { hasPassword: true });
+      }
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
@@ -176,7 +187,10 @@ export function SettingsView() {
         'success'
       );
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to update password.', 'error');
+      showToast(
+        mapFirebaseAuthError(err, 'Failed to update password.'),
+        'error'
+      );
     } finally {
       setSavingPassword(false);
     }

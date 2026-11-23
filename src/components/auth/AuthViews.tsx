@@ -594,7 +594,7 @@ function ForgotPasswordCard({
           Reset your password
         </h1>
         <p className="text-xs text-neutral-400 mt-1.5">
-          Enter your account email address to check password reset availability.
+          Enter your account email address and we will send you a password reset link.
         </p>
       </div>
 

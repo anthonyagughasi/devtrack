@@ -15,8 +15,13 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
+import { formatClientError } from '../../lib/firebase';
 import { cn, formatRelativeTime } from '../../lib/utils';
+import {
+  getUserNotifications,
+  markAllNotificationsRead,
+  markNotificationRead,
+} from '../../services/notifications';
 import type { NotificationItem } from '../../types/app';
 import { Avatar } from '../ui/Avatar';
 import { Button } from '../ui/Button';
@@ -32,7 +37,7 @@ export type NavRoute =
 interface AppShellProps {
   activeRoute: NavRoute;
   breadcrumb: string;
-  onNavigate: (route: NavRoute, projectId?: number, taskId?: number) => void;
+  onNavigate: (route: NavRoute, projectId?: string, taskId?: string) => void;
   onNewProject: () => void;
   children: React.ReactNode;
   refreshTrigger?: number;
@@ -64,11 +69,9 @@ export function AppShell({
   const notifRef = useRef<HTMLDivElement>(null);
 
   const loadNotifications = async () => {
+    if (!profile) return;
     try {
-      const data = await apiFetch<{
-        items: NotificationItem[];
-        unreadCount: number;
-      }>('/api/notifications');
+      const data = await getUserNotifications(profile);
       setNotifications(data.items);
       setUnreadCount(data.unreadCount);
     } catch {
@@ -78,7 +81,7 @@ export function AppShell({
 
   useEffect(() => {
     loadNotifications();
-  }, [refreshTrigger, activeRoute]);
+  }, [refreshTrigger, activeRoute, profile]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -91,9 +94,10 @@ export function AppShell({
   }, []);
 
   const handleMarkRead = async (notif: NotificationItem) => {
+    if (!profile) return;
     try {
       if (!notif.read) {
-        await apiFetch(`/api/notifications/${notif.id}/read`, { method: 'PATCH' });
+        await markNotificationRead(profile.uid, notif.id);
         setNotifications((prev) =>
           prev.map((n) => (n.id === notif.id ? { ...n, read: true } : n))
         );
@@ -101,13 +105,11 @@ export function AppShell({
       }
       setNotifOpen(false);
       if (notif.link) {
-        const projectMatch = notif.link.match(/^\/projects\/(\d+)(?:\?task=(\d+))?/);
+        const projectMatch = notif.link.match(
+          /^\/projects\/([a-zA-Z0-9_-]+)(?:\?task=([a-zA-Z0-9_-]+))?/
+        );
         if (projectMatch) {
-          onNavigate(
-            'projects',
-            Number(projectMatch[1]),
-            projectMatch[2] ? Number(projectMatch[2]) : undefined
-          );
+          onNavigate('projects', projectMatch[1], projectMatch[2] || undefined);
           return;
         }
         if (notif.link.startsWith('/team')) {
@@ -115,18 +117,19 @@ export function AppShell({
         }
       }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to update notification.', 'error');
+      showToast(formatClientError(err, 'Failed to update notification.'), 'error');
     }
   };
 
   const handleMarkAllRead = async () => {
+    if (!profile) return;
     try {
-      await apiFetch('/api/notifications/read-all', { method: 'POST' });
+      await markAllNotificationsRead(profile.uid);
       setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
       setUnreadCount(0);
       showToast('All notifications marked as read.', 'success');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to update notifications.', 'error');
+      showToast(formatClientError(err, 'Failed to update notifications.'), 'error');
     }
   };
 

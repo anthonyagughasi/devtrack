@@ -2,9 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
+import { formatClientError } from '../../lib/firebase';
 import { PROJECT_STATUSES, type ProjectStatus } from '../../lib/validations';
+import { createProject, updateProject } from '../../services/projects';
 import { Button } from '../ui/Button';
 import { Modal } from '../ui/Modal';
 
@@ -22,14 +24,14 @@ interface ProjectFormModalProps {
   open: boolean;
   onClose: () => void;
   initialProject?: {
-    id: number;
+    id: string;
     name: string;
     description: string;
     status: ProjectStatus;
     startDate: string | null;
     deadline: string | null;
   } | null;
-  onSaved: (projectId: number) => void;
+  onSaved: (projectId: string) => void;
 }
 
 export function ProjectFormModal({
@@ -38,6 +40,7 @@ export function ProjectFormModal({
   initialProject,
   onSaved,
 }: ProjectFormModalProps) {
+  const { profile } = useAuth();
   const { showToast } = useToast();
   const [submitting, setSubmitting] = useState(false);
   const isEdit = Boolean(initialProject);
@@ -84,6 +87,7 @@ export function ProjectFormModal({
   }, [open, initialProject, reset]);
 
   const onSubmit = async (values: ProjectFormValues) => {
+    if (!profile) return;
     setSubmitting(true);
     try {
       const payload = {
@@ -99,26 +103,17 @@ export function ProjectFormModal({
       };
 
       if (isEdit && initialProject) {
-        const res = await apiFetch<{ project: { id: number } }>(
-          `/api/projects/${initialProject.id}`,
-          {
-            method: 'PATCH',
-            body: JSON.stringify(payload),
-          }
-        );
+        const res = await updateProject(profile, initialProject.id, payload);
         showToast('Project updated.', 'success');
-        onSaved(res.project.id);
+        onSaved(res.id);
       } else {
-        const res = await apiFetch<{ project: { id: number } }>('/api/projects', {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        });
+        const res = await createProject(profile, payload);
         showToast('Project created.', 'success');
-        onSaved(res.project.id);
+        onSaved(res.id);
       }
       onClose();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to save project.', 'error');
+      showToast(formatClientError(err, 'Failed to save project.'), 'error');
     } finally {
       setSubmitting(false);
     }

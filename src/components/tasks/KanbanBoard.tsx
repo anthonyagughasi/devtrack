@@ -21,10 +21,12 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { AlertTriangle, Calendar, GripVertical, MessageSquare, Plus } from 'lucide-react';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
+import { formatClientError } from '../../lib/firebase';
 import { cn, formatDate, isOverdue } from '../../lib/utils';
 import type { TaskStatus } from '../../lib/validations';
+import { moveTask } from '../../services/tasks';
 import type { TaskItem } from '../../types/app';
 import { Avatar } from '../ui/Avatar';
 import { TaskPriorityText } from '../ui/StatusText';
@@ -38,7 +40,7 @@ const COLUMNS: Array<{ id: TaskStatus; title: string }> = [
 interface KanbanBoardProps {
   tasks: TaskItem[];
   onTasksChange: (tasks: TaskItem[]) => void;
-  onSelectTask: (taskId: number) => void;
+  onSelectTask: (taskId: string) => void;
   onAddTask: (status: TaskStatus) => void;
   showProjectName?: boolean;
 }
@@ -50,7 +52,7 @@ function SortableTaskCard({
   isOverlay = false,
 }: {
   task: TaskItem;
-  onSelectTask: (taskId: number) => void;
+  onSelectTask: (taskId: string) => void;
   showProjectName?: boolean;
   isOverlay?: boolean;
 }) {
@@ -161,7 +163,7 @@ function KanbanColumn({
   id: TaskStatus;
   title: string;
   tasks: TaskItem[];
-  onSelectTask: (taskId: number) => void;
+  onSelectTask: (taskId: string) => void;
   onAddTask: (status: TaskStatus) => void;
   showProjectName?: boolean;
 }) {
@@ -228,6 +230,7 @@ export function KanbanBoard({
   onAddTask,
   showProjectName = false,
 }: KanbanBoardProps) {
+  const { profile } = useAuth();
   const { showToast } = useToast();
   const [boardTasks, setBoardTasks] = useState<TaskItem[]>(tasks);
   const [activeTask, setActiveTask] = useState<TaskItem | null>(null);
@@ -247,7 +250,7 @@ export function KanbanBoard({
       return id.replace('col-', '') as TaskStatus;
     }
     if (id.startsWith('task-')) {
-      const taskId = Number(id.replace('task-', ''));
+      const taskId = id.replace('task-', '');
       const found = boardTasks.find((t) => t.id === taskId);
       return (found?.status as TaskStatus) ?? null;
     }
@@ -257,7 +260,7 @@ export function KanbanBoard({
   const handleDragStart = (event: DragStartEvent) => {
     setSnapshotTasks(boardTasks);
     const idStr = String(event.active.id);
-    const taskId = Number(idStr.replace('task-', ''));
+    const taskId = idStr.replace('task-', '');
     const found = boardTasks.find((t) => t.id === taskId) ?? null;
     setActiveTask(found);
   };
@@ -274,7 +277,7 @@ export function KanbanBoard({
     const overStatus = findContainer(overId);
     if (!activeStatus || !overStatus || activeStatus === overStatus) return;
 
-    const activeTaskId = Number(activeId.replace('task-', ''));
+    const activeTaskId = activeId.replace('task-', '');
     setBoardTasks((prev) =>
       prev.map((t) => (t.id === activeTaskId ? { ...t, status: overStatus } : t))
     );
@@ -284,14 +287,14 @@ export function KanbanBoard({
     const { active, over } = event;
     setActiveTask(null);
 
-    if (!over) {
+    if (!over || !profile) {
       setBoardTasks(snapshotTasks);
       return;
     }
 
     const activeId = String(active.id);
     const overId = String(over.id);
-    const activeTaskId = Number(activeId.replace('task-', ''));
+    const activeTaskId = activeId.replace('task-', '');
     const targetStatus = findContainer(overId);
 
     if (!targetStatus) {
@@ -304,7 +307,7 @@ export function KanbanBoard({
     let newIndex = columnTasks.length - 1;
 
     if (overId.startsWith('task-')) {
-      const overTaskId = Number(overId.replace('task-', ''));
+      const overTaskId = overId.replace('task-', '');
       const idx = columnTasks.findIndex((t) => t.id === overTaskId);
       if (idx !== -1) newIndex = idx;
     }
@@ -341,21 +344,18 @@ export function KanbanBoard({
     if (!movedChanged) return;
 
     try {
-      await apiFetch(`/api/tasks/${activeTaskId}/move`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          status: targetStatus,
-          position: finalPosition,
-        }),
-      });
+      await moveTask(
+        profile,
+        activeTaskId,
+        { status: targetStatus, position: finalPosition },
+        prevTask?.projectId
+      );
     } catch (err) {
       // Revert optimistic update on server failure
       setBoardTasks(snapshotTasks);
       onTasksChange(snapshotTasks);
       showToast(
-        err instanceof Error
-          ? err.message
-          : 'Failed to save task position. Reverted change.',
+        formatClientError(err, 'Failed to save task position. Reverted change.'),
         'error'
       );
     }

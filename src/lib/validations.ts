@@ -36,13 +36,13 @@ export const updateProjectSchema = z.object({
 });
 
 export const createTaskSchema = z.object({
-  projectId: z.coerce.number().int().positive('Project is required'),
+  projectId: z.string().trim().min(1, 'Project is required').max(128),
   title: z.string().trim().min(2, 'Task title must be at least 2 characters').max(200),
   description: z.string().trim().max(4000).optional().default(''),
   status: z.enum(TASK_STATUSES).optional().default('TODO'),
   priority: z.enum(TASK_PRIORITIES).optional().default('MEDIUM'),
   dueDate: z.string().nullable().optional(),
-  assigneeId: z.coerce.number().int().positive().nullable().optional(),
+  assigneeId: z.string().trim().min(1).max(128).nullable().optional(),
 });
 
 export const updateTaskSchema = z.object({
@@ -51,7 +51,7 @@ export const updateTaskSchema = z.object({
   status: z.enum(TASK_STATUSES).optional(),
   priority: z.enum(TASK_PRIORITIES).optional(),
   dueDate: z.string().nullable().optional(),
-  assigneeId: z.coerce.number().int().positive().nullable().optional(),
+  assigneeId: z.string().trim().min(1).max(128).nullable().optional(),
   position: z.coerce.number().int().min(0).optional(),
 });
 
@@ -75,7 +75,7 @@ export const updateMemberRoleSchema = z.object({
 
 export const updateUserSettingsSchema = z.object({
   name: z.string().trim().min(2, 'Display name must be at least 2 characters').max(80).optional(),
-  avatar: z.string().trim().max(500).nullable().optional(),
+  avatar: z.string().trim().max(350000).nullable().optional(),
   themePreference: z.enum(['dark', 'light']).optional(),
   notifyOnAssign: z.boolean().optional(),
   notifyOnComment: z.boolean().optional(),
@@ -137,4 +137,3 @@ export const changePasswordSchema = z
     message: 'Passwords do not match',
     path: ['confirmPassword'],
   });
-

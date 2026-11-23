@@ -13,15 +13,22 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiFetch } from '../../lib/api';
+import { formatClientError } from '../../lib/firebase';
 import { formatDate, formatRelativeTime, isOverdue } from '../../lib/utils';
-import type { ProjectRole, ProjectStatus, TaskStatus } from '../../lib/validations';
-import type {
-  ActivityItem,
-  InvitationItem,
-  ProjectMemberItem,
-  TaskItem,
-} from '../../types/app';
+import type { TaskStatus } from '../../lib/validations';
+import {
+  deleteProject,
+  getProjectDetails,
+  type ProjectDetailResult,
+} from '../../services/projects';
+import {
+  inviteMember,
+  listProjectInvitations,
+  removeMember,
+  revokeInvitation,
+  updateMemberRole,
+} from '../../services/team';
+import type { InvitationItem, ProjectMemberItem } from '../../types/app';
 import { KanbanBoard } from '../tasks/KanbanBoard';
 import { TaskModal } from '../tasks/TaskModal';
 import { Avatar } from '../ui/Avatar';
@@ -32,32 +39,9 @@ import { Skeleton } from '../ui/Skeleton';
 import { ProjectStatusText, TaskPriorityText } from '../ui/StatusText';
 import { ProjectFormModal } from './ProjectFormModal';
 
-interface ProjectDetailData {
-  project: {
-    id: number;
-    name: string;
-    description: string;
-    status: ProjectStatus;
-    startDate: string | null;
-    deadline: string | null;
-    ownerId: number;
-    owner: { id: number; name: string; email: string; avatar: string | null };
-    role: ProjectRole;
-    totalTasks: number;
-    completedTasks: number;
-    inProgressTasks: number;
-    todoTasks: number;
-    overdueTasks: number;
-    progress: number;
-  };
-  members: ProjectMemberItem[];
-  tasks: TaskItem[];
-  activities: ActivityItem[];
-}
-
 interface ProjectDetailViewProps {
-  projectId: number;
-  initialTaskId?: number;
+  projectId: string;
+  initialTaskId?: string;
   onBack: () => void;
   refreshTrigger: number;
   onDataChanged: () => void;
@@ -73,7 +57,7 @@ export function ProjectDetailView({
   const { profile } = useAuth();
   const { showToast } = useToast();
 
-  const [data, setData] = useState<ProjectDetailData | null>(null);
+  const [data, setData] = useState<ProjectDetailResult | null>(null);
   const [invitations, setInvitations] = useState<InvitationItem[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -82,7 +66,7 @@ export function ProjectDetailView({
   const [deleting, setDeleting] = useState(false);
 
   const [taskModalOpen, setTaskModalOpen] = useState(false);
-  const [selectedTaskId, setSelectedTaskId] = useState<number | null>(initialTaskId ?? null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(initialTaskId ?? null);
   const [defaultTaskStatus, setDefaultTaskStatus] = useState<TaskStatus>('TODO');
 
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -93,26 +77,25 @@ export function ProjectDetailView({
   const [removingMember, setRemovingMember] = useState<ProjectMemberItem | null>(null);
 
   const loadProject = useCallback(async () => {
+    if (!profile) return;
     setLoading(true);
     try {
-      const res = await apiFetch<ProjectDetailData>(`/api/projects/${projectId}`);
+      const res = await getProjectDetails(profile.uid, projectId);
       setData(res);
 
       if (res.project.role === 'OWNER' || res.project.role === 'ADMINISTRATOR') {
-        const invRes = await apiFetch<{ invitations: InvitationItem[] }>(
-          `/api/projects/${projectId}/invitations`
-        );
-        setInvitations(invRes.invitations.filter((i) => i.status === 'PENDING'));
+        const invList = await listProjectInvitations(profile.uid, projectId);
+        setInvitations(invList);
       } else {
         setInvitations([]);
       }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to load project.', 'error');
+      showToast(formatClientError(err, 'Failed to load project.'), 'error');
       onBack();
     } finally {
       setLoading(false);
     }
-  }, [projectId, showToast, onBack]);
+  }, [profile, projectId, showToast, onBack]);
 
   useEffect(() => {
     loadProject();
@@ -126,15 +109,16 @@ export function ProjectDetailView({
   }, [initialTaskId]);
 
   const handleDeleteProject = async () => {
+    if (!profile) return;
     setDeleting(true);
     try {
-      await apiFetch(`/api/projects/${projectId}`, { method: 'DELETE' });
+      await deleteProject(profile, projectId);
       showToast('Project deleted.', 'success');
       setDeleteOpen(false);
       onDataChanged();
       onBack();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to delete project.', 'error');
+      showToast(formatClientError(err, 'Failed to delete project.'), 'error');
     } finally {
       setDeleting(false);
     }
@@ -144,34 +128,27 @@ export function ProjectDetailView({
 
   const handleInviteSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inviteEmail.trim()) return;
+    if (!profile || !inviteEmail.trim()) return;
     setInviting(true);
     setInviteError(null);
     const recipient = inviteEmail.trim();
     try {
-      const res = await apiFetch<{
-        invitation: InvitationItem;
-      }>(`/api/projects/${projectId}/invitations`, {
-        method: 'POST',
-        body: JSON.stringify({ email: recipient, role: inviteRole }),
+      const invitation = await inviteMember(profile, projectId, {
+        email: recipient,
+        role: inviteRole,
       });
 
-      if (!res || !res.invitation) {
-        throw new Error('Failed to create invitation.');
-      }
-
       const statusMsg =
-        "Invitation created. It will appear in the recipient's DevTrack account when they register or sign in.";
+        "Invitation created. It will appear in the recipient's DevTrack account when they sign in with that email, or you can share the invite token.";
 
       showToast(statusMsg, 'success');
       setInviteEmail('');
       setInviteOpen(false);
-      setInvitations((prev) => [res.invitation, ...prev]);
+      setInvitations((prev) => [invitation, ...prev]);
       loadProject();
       onDataChanged();
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'Failed to create invitation.';
+      const msg = formatClientError(err, 'Failed to create invitation.');
       setInviteError(msg);
       showToast(msg, 'error');
     } finally {
@@ -188,41 +165,38 @@ export function ProjectDetailView({
     }
   };
 
-  const handleRevokeInvite = async (inviteId: number) => {
+  const handleRevokeInvite = async (inviteId: string) => {
+    if (!profile) return;
     try {
-      await apiFetch(`/api/invitations/${inviteId}`, { method: 'DELETE' });
+      await revokeInvitation(profile, inviteId);
       setInvitations((prev) => prev.filter((i) => i.id !== inviteId));
       showToast('Invitation revoked.', 'success');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to revoke invitation.', 'error');
+      showToast(formatClientError(err, 'Failed to revoke invitation.'), 'error');
     }
   };
 
-  const handleRoleChange = async (userId: number, role: 'ADMINISTRATOR' | 'MEMBER') => {
+  const handleRoleChange = async (userId: string, role: 'ADMINISTRATOR' | 'MEMBER') => {
+    if (!profile) return;
     try {
-      await apiFetch(`/api/projects/${projectId}/members/${userId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ role }),
-      });
+      await updateMemberRole(profile, projectId, userId, role);
       showToast('Member role updated.', 'success');
       loadProject();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to update role.', 'error');
+      showToast(formatClientError(err, 'Failed to update role.'), 'error');
     }
   };
 
   const handleRemoveMember = async () => {
-    if (!removingMember) return;
+    if (!removingMember || !profile) return;
     try {
-      await apiFetch(`/api/projects/${projectId}/members/${removingMember.userId}`, {
-        method: 'DELETE',
-      });
+      await removeMember(profile, projectId, removingMember.userId);
       showToast(`Removed ${removingMember.name} from project.`, 'success');
       setRemovingMember(null);
       loadProject();
       onDataChanged();
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to remove member.', 'error');
+      showToast(formatClientError(err, 'Failed to remove member.'), 'error');
     }
   };
 
