@@ -4,8 +4,10 @@ import {
   doc,
   getDoc,
   getDocs,
+  query,
   serverTimestamp,
   updateDoc,
+  where,
   writeBatch,
   type DocumentData,
 } from 'firebase/firestore';
@@ -125,10 +127,20 @@ export async function listUserTasks(
   await Promise.all(
     targetProjects.map(async (proj) => {
       const [membersSnap, tasksSnap] = await Promise.all([
-        getDocs(collection(firestoreDb, 'projects', proj.id, 'members')).catch((err) =>
+        getDocs(
+          query(
+            collection(firestoreDb, 'projects', proj.id, 'members'),
+            where('projectId', '==', proj.id)
+          )
+        ).catch((err) =>
           handleFirestoreError(err, OperationType.LIST, `projects/${proj.id}/members`)
         ),
-        getDocs(collection(firestoreDb, 'projects', proj.id, 'tasks')).catch((err) =>
+        getDocs(
+          query(
+            collection(firestoreDb, 'projects', proj.id, 'tasks'),
+            where('projectId', '==', proj.id)
+          )
+        ).catch((err) =>
           handleFirestoreError(err, OperationType.LIST, `projects/${proj.id}/tasks`)
         ),
       ]);
@@ -139,7 +151,10 @@ export async function listUserTasks(
         tasksSnap.docs.map(async (td) => {
           try {
             const cSnap = await getDocs(
-              collection(firestoreDb, 'projects', proj.id, 'tasks', td.id, 'comments')
+              query(
+                collection(firestoreDb, 'projects', proj.id, 'tasks', td.id, 'comments'),
+                where('projectId', '==', proj.id)
+              )
             );
             return [td.id, cSnap.size] as const;
           } catch {
@@ -248,10 +263,20 @@ export async function createTask(
     getDoc(doc(firestoreDb, 'projects', projectId)).catch((err) =>
       handleFirestoreError(err, OperationType.GET, `projects/${projectId}`)
     ),
-    getDocs(collection(firestoreDb, 'projects', projectId, 'members')).catch((err) =>
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'members'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
       handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/members`)
     ),
-    getDocs(collection(firestoreDb, 'projects', projectId, 'tasks')).catch((err) =>
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'tasks'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
       handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/tasks`)
     ),
   ]);
@@ -340,18 +365,32 @@ export async function getTaskDetails(
   await requireProjectRole(projectId, userId);
 
   const [membersSnap, commentsSnap, activitiesSnap] = await Promise.all([
-    getDocs(collection(firestoreDb, 'projects', projectId, 'members')).catch((err) =>
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'members'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
       handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/members`)
     ),
-    getDocs(collection(firestoreDb, 'projects', projectId, 'tasks', taskId, 'comments')).catch(
-      (err) =>
-        handleFirestoreError(
-          err,
-          OperationType.LIST,
-          `projects/${projectId}/tasks/${taskId}/comments`
-        )
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'tasks', taskId, 'comments'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
+      handleFirestoreError(
+        err,
+        OperationType.LIST,
+        `projects/${projectId}/tasks/${taskId}/comments`
+      )
     ),
-    getDocs(collection(firestoreDb, 'projects', projectId, 'activities')).catch((err) =>
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'activities'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
       handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/activities`)
     ),
   ]);
@@ -625,7 +664,10 @@ export async function deleteTask(
   const title = String(existing.title ?? 'Task');
 
   const commentsSnap = await getDocs(
-    collection(firestoreDb, 'projects', projectId, 'tasks', taskId, 'comments')
+    query(
+      collection(firestoreDb, 'projects', projectId, 'tasks', taskId, 'comments'),
+      where('projectId', '==', projectId)
+    )
   ).catch((err) =>
     handleFirestoreError(
       err,

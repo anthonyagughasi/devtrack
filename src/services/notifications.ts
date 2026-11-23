@@ -63,18 +63,21 @@ async function syncPendingNotificationsForUser(profile: UserProfile): Promise<vo
 
   if (profile.notifyOnDeadline) {
     try {
-      const refsSnap = await getDocs(collection(firestoreDb, 'users', uid, 'projectRefs'));
+      const refsSnap = await getDocs(
+        query(collection(firestoreDb, 'users', uid, 'projectRefs'), where('userId', '==', uid))
+      );
       for (const refDoc of refsSnap.docs) {
         const projectId = refDoc.id;
         try {
           const tasksSnap = await getDocs(
             query(
               collection(firestoreDb, 'projects', projectId, 'tasks'),
-              where('assigneeId', '==', uid)
+              where('projectId', '==', projectId)
             )
           );
           for (const taskDoc of tasksSnap.docs) {
             const taskData = taskDoc.data();
+            if (taskData.assigneeId !== uid) continue;
             if (taskData.status === 'COMPLETED') continue;
             const dueIso = nullableIso(taskData.dueDate);
             if (!dueIso) continue;
@@ -152,7 +155,12 @@ export async function getUserNotifications(
   const path = `users/${profile.uid}/notifications`;
   let snap;
   try {
-    snap = await getDocs(collection(firestoreDb, 'users', profile.uid, 'notifications'));
+    snap = await getDocs(
+      query(
+        collection(firestoreDb, 'users', profile.uid, 'notifications'),
+        where('userId', '==', profile.uid)
+      )
+    );
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, path);
   }
@@ -215,16 +223,20 @@ export async function markAllNotificationsRead(userId: string): Promise<void> {
   let snap;
   try {
     snap = await getDocs(
-      query(collection(firestoreDb, 'users', userId, 'notifications'), where('read', '==', false))
+      query(
+        collection(firestoreDb, 'users', userId, 'notifications'),
+        where('userId', '==', userId)
+      )
     );
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, path);
   }
 
-  if (snap.empty) return;
+  const unreadDocs = snap.docs.filter((d) => d.data().read === false);
+  if (unreadDocs.length === 0) return;
 
   const batch = writeBatch(firestoreDb);
-  for (const d of snap.docs) {
+  for (const d of unreadDocs) {
     batch.update(d.ref, { read: true });
   }
   try {

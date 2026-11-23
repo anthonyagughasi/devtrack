@@ -376,7 +376,7 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(projectId) && isProjectOwner(projectId);
 
       match /members/{memberId} {
-        allow get: if isSignedIn() && isValidId(projectId) && isValidId(memberId) && isProjectMember(projectId);
+        allow get: if isSignedIn() && isValidId(projectId) && isValidId(memberId) && (isProjectMember(projectId) || memberId == request.auth.uid);
         allow list: if isSignedIn() && resource.data.projectId == projectId && isProjectMember(projectId);
         allow create: if isSignedIn()
           && isValidId(projectId)

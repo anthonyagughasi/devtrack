@@ -1,4 +1,4 @@
-import { collection, getDocs } from 'firebase/firestore';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import { firestoreDb, handleFirestoreError, OperationType } from '../lib/firebase';
 import type { ActivityItem } from '../types/app';
 import { timestampToIso } from './firestore-helpers';
@@ -24,7 +24,12 @@ export async function listWorkspaceActivity(
     filteredProjects.map(async (proj) => {
       const path = `projects/${proj.id}/activities`;
       try {
-        const snap = await getDocs(collection(firestoreDb, 'projects', proj.id, 'activities'));
+        const snap = await getDocs(
+          query(
+            collection(firestoreDb, 'projects', proj.id, 'activities'),
+            where('projectId', '==', proj.id)
+          )
+        );
         for (const d of snap.docs) {
           const data = d.data();
           allActivities.push({

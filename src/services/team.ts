@@ -76,13 +76,28 @@ export async function listWorkspaceTeam(userId: string): Promise<{
   await Promise.all(
     projects.map(async (proj) => {
       const [membersSnap, tasksSnap, activitiesSnap] = await Promise.all([
-        getDocs(collection(firestoreDb, 'projects', proj.id, 'members')).catch((err) =>
+        getDocs(
+          query(
+            collection(firestoreDb, 'projects', proj.id, 'members'),
+            where('projectId', '==', proj.id)
+          )
+        ).catch((err) =>
           handleFirestoreError(err, OperationType.LIST, `projects/${proj.id}/members`)
         ),
-        getDocs(collection(firestoreDb, 'projects', proj.id, 'tasks')).catch((err) =>
+        getDocs(
+          query(
+            collection(firestoreDb, 'projects', proj.id, 'tasks'),
+            where('projectId', '==', proj.id)
+          )
+        ).catch((err) =>
           handleFirestoreError(err, OperationType.LIST, `projects/${proj.id}/tasks`)
         ),
-        getDocs(collection(firestoreDb, 'projects', proj.id, 'activities')).catch((err) =>
+        getDocs(
+          query(
+            collection(firestoreDb, 'projects', proj.id, 'activities'),
+            where('projectId', '==', proj.id)
+          )
+        ).catch((err) =>
           handleFirestoreError(err, OperationType.LIST, `projects/${proj.id}/activities`)
         ),
       ]);
@@ -233,7 +248,12 @@ export async function inviteMember(
     getDoc(doc(firestoreDb, 'projects', projectId)).catch((err) =>
       handleFirestoreError(err, OperationType.GET, `projects/${projectId}`)
     ),
-    getDocs(collection(firestoreDb, 'projects', projectId, 'members')).catch((err) =>
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'members'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
       handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/members`)
     ),
   ]);
@@ -541,18 +561,22 @@ export async function removeMember(
   }
 
   // Unassign any tasks assigned to the departing member before removing membership
-  const assignedTasksSnap = await getDocs(
+  const projectTasksSnap = await getDocs(
     query(
       collection(firestoreDb, 'projects', projectId, 'tasks'),
-      where('assigneeId', '==', targetUserId)
+      where('projectId', '==', projectId)
     )
   ).catch((err) =>
     handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/tasks`)
   );
 
-  if (!assignedTasksSnap.empty) {
+  const assignedTaskDocs = projectTasksSnap.docs.filter(
+    (td) => td.data().assigneeId === targetUserId
+  );
+
+  if (assignedTaskDocs.length > 0) {
     await commitOperationsInChunks(
-      assignedTasksSnap.docs.map(
+      assignedTaskDocs.map(
         (td) => (b) =>
           b.update(td.ref, {
             assigneeId: null,

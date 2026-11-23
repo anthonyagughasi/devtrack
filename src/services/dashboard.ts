@@ -1,4 +1,4 @@
-import { collection, getDocs } from 'firebase/firestore';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import { firestoreDb, handleFirestoreError, OperationType } from '../lib/firebase';
 import { isOverdue } from '../lib/utils';
 import type { TaskPriority, TaskStatus } from '../lib/validations';
@@ -64,13 +64,28 @@ export async function getDashboardAnalytics(
   await Promise.all(
     projects.map(async (proj) => {
       const [membersSnap, tasksSnap, activitiesSnap] = await Promise.all([
-        getDocs(collection(firestoreDb, 'projects', proj.id, 'members')).catch((err) =>
+        getDocs(
+          query(
+            collection(firestoreDb, 'projects', proj.id, 'members'),
+            where('projectId', '==', proj.id)
+          )
+        ).catch((err) =>
           handleFirestoreError(err, OperationType.LIST, `projects/${proj.id}/members`)
         ),
-        getDocs(collection(firestoreDb, 'projects', proj.id, 'tasks')).catch((err) =>
+        getDocs(
+          query(
+            collection(firestoreDb, 'projects', proj.id, 'tasks'),
+            where('projectId', '==', proj.id)
+          )
+        ).catch((err) =>
           handleFirestoreError(err, OperationType.LIST, `projects/${proj.id}/tasks`)
         ),
-        getDocs(collection(firestoreDb, 'projects', proj.id, 'activities')).catch((err) =>
+        getDocs(
+          query(
+            collection(firestoreDb, 'projects', proj.id, 'activities'),
+            where('projectId', '==', proj.id)
+          )
+        ).catch((err) =>
           handleFirestoreError(err, OperationType.LIST, `projects/${proj.id}/activities`)
         ),
       ]);

@@ -4,9 +4,11 @@ import {
   doc,
   getDoc,
   getDocs,
+  query,
   serverTimestamp,
   setDoc,
   updateDoc,
+  where,
   writeBatch,
 } from 'firebase/firestore';
 import {
@@ -138,7 +140,9 @@ async function syncMemberProfileAcrossProjects(
   const refsPath = `users/${uid}/projectRefs`;
   let refsSnap;
   try {
-    refsSnap = await getDocs(collection(firestoreDb, 'users', uid, 'projectRefs'));
+    refsSnap = await getDocs(
+      query(collection(firestoreDb, 'users', uid, 'projectRefs'), where('userId', '==', uid))
+    );
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, refsPath);
   }

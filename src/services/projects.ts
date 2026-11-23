@@ -61,7 +61,9 @@ export async function getAccessibleProjectsRaw(
   const refsPath = `users/${userId}/projectRefs`;
   let refsSnap;
   try {
-    refsSnap = await getDocs(collection(firestoreDb, 'users', userId, 'projectRefs'));
+    refsSnap = await getDocs(
+      query(collection(firestoreDb, 'users', userId, 'projectRefs'), where('userId', '==', userId))
+    );
   } catch (err) {
     handleFirestoreError(err, OperationType.LIST, refsPath);
   }
@@ -131,10 +133,20 @@ export async function listUserProjects(
   return Promise.all(
     filtered.map(async (proj) => {
       const [membersSnap, tasksSnap] = await Promise.all([
-        getDocs(collection(firestoreDb, 'projects', proj.id, 'members')).catch((err) =>
+        getDocs(
+          query(
+            collection(firestoreDb, 'projects', proj.id, 'members'),
+            where('projectId', '==', proj.id)
+          )
+        ).catch((err) =>
           handleFirestoreError(err, OperationType.LIST, `projects/${proj.id}/members`)
         ),
-        getDocs(collection(firestoreDb, 'projects', proj.id, 'tasks')).catch((err) =>
+        getDocs(
+          query(
+            collection(firestoreDb, 'projects', proj.id, 'tasks'),
+            where('projectId', '==', proj.id)
+          )
+        ).catch((err) =>
           handleFirestoreError(err, OperationType.LIST, `projects/${proj.id}/tasks`)
         ),
       ]);
@@ -282,13 +294,28 @@ export async function getProjectDetails(
     getDoc(doc(firestoreDb, 'projects', projectId)).catch((err) =>
       handleFirestoreError(err, OperationType.GET, `projects/${projectId}`)
     ),
-    getDocs(collection(firestoreDb, 'projects', projectId, 'members')).catch((err) =>
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'members'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
       handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/members`)
     ),
-    getDocs(collection(firestoreDb, 'projects', projectId, 'tasks')).catch((err) =>
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'tasks'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
       handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/tasks`)
     ),
-    getDocs(collection(firestoreDb, 'projects', projectId, 'activities')).catch((err) =>
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'activities'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
       handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/activities`)
     ),
   ]);
@@ -329,7 +356,10 @@ export async function getProjectDetails(
     tasksSnap.docs.map(async (td) => {
       try {
         const cSnap = await getDocs(
-          collection(firestoreDb, 'projects', projectId, 'tasks', td.id, 'comments')
+          query(
+            collection(firestoreDb, 'projects', projectId, 'tasks', td.id, 'comments'),
+            where('projectId', '==', projectId)
+          )
         );
         return [td.id, cSnap.size] as const;
       } catch {
@@ -493,13 +523,28 @@ export async function deleteProject(actor: UserProfile, projectId: string): Prom
   await requireProjectRole(projectId, actor.uid, ['OWNER']);
 
   const [tasksSnap, activitiesSnap, membersSnap, invitationsSnap] = await Promise.all([
-    getDocs(collection(firestoreDb, 'projects', projectId, 'tasks')).catch((err) =>
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'tasks'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
       handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/tasks`)
     ),
-    getDocs(collection(firestoreDb, 'projects', projectId, 'activities')).catch((err) =>
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'activities'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
       handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/activities`)
     ),
-    getDocs(collection(firestoreDb, 'projects', projectId, 'members')).catch((err) =>
+    getDocs(
+      query(
+        collection(firestoreDb, 'projects', projectId, 'members'),
+        where('projectId', '==', projectId)
+      )
+    ).catch((err) =>
       handleFirestoreError(err, OperationType.LIST, `projects/${projectId}/members`)
     ),
     getDocs(
@@ -514,7 +559,10 @@ export async function deleteProject(actor: UserProfile, projectId: string): Prom
   await Promise.all(
     tasksSnap.docs.map(async (td) => {
       const cSnap = await getDocs(
-        collection(firestoreDb, 'projects', projectId, 'tasks', td.id, 'comments')
+        query(
+          collection(firestoreDb, 'projects', projectId, 'tasks', td.id, 'comments'),
+          where('projectId', '==', projectId)
+        )
       );
       for (const cd of cSnap.docs) {
         commentRefs.push(cd.ref);
