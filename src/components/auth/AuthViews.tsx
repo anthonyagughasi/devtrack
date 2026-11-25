@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
+  Play,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -30,6 +31,7 @@ interface AuthViewsProps {
   route: Exclude<AuthRoute, 'landing'>;
   initialToken?: string;
   onNavigate: (next: AuthRoute, token?: string) => void;
+  onExploreDemo?: () => void;
   onCompleteAuth?: () => void;
 }
 
@@ -123,6 +125,7 @@ export function AuthViews({
   route,
   initialToken,
   onNavigate,
+  onExploreDemo,
   onCompleteAuth,
 }: AuthViewsProps) {
   const {
@@ -188,6 +191,7 @@ export function AuthViews({
                 showToast('Welcome back to DevTrack.', 'success');
                 onCompleteAuth?.();
               }}
+              onExploreDemo={onExploreDemo}
               onNavigate={onNavigate}
             />
           )}
@@ -203,6 +207,7 @@ export function AuthViews({
                 onCompleteAuth?.();
                 return res;
               }}
+              onExploreDemo={onExploreDemo}
               onNavigate={onNavigate}
             />
           )}
@@ -232,12 +237,14 @@ function LoginCard({
   googleLoading,
   onGoogleSignIn,
   onLogin,
+  onExploreDemo,
   onNavigate,
 }: {
   authConfigGoogle: boolean;
   googleLoading: boolean;
   onGoogleSignIn: () => Promise<void>;
   onLogin: (email: string, password: string) => Promise<void>;
+  onExploreDemo?: () => void;
   onNavigate: (next: AuthRoute) => void;
 }) {
   const [submitting, setSubmitting] = useState(false);
@@ -352,6 +359,18 @@ function LoginCard({
         <span>Continue with Google</span>
       </Button>
 
+      {onExploreDemo && (
+        <Button
+          type="button"
+          variant="ghost"
+          className="w-full h-9 border border-neutral-800 text-neutral-300 hover:text-white"
+          onClick={onExploreDemo}
+        >
+          <Play className="h-3.5 w-3.5 text-emerald-400" />
+          <span>Explore Demo without signing in</span>
+        </Button>
+      )}
+
       <p className="text-center text-xs text-neutral-400">
         New to DevTrack?{' '}
         <button
@@ -371,6 +390,7 @@ function RegisterCard({
   googleLoading,
   onGoogleSignIn,
   onRegister,
+  onExploreDemo,
   onNavigate,
 }: {
   authConfigGoogle: boolean;
@@ -380,6 +400,7 @@ function RegisterCard({
     requiresVerification: boolean;
     message: string;
   }>;
+  onExploreDemo?: () => void;
   onNavigate: (next: AuthRoute) => void;
 }) {
   const [submitting, setSubmitting] = useState(false);
@@ -534,6 +555,18 @@ function RegisterCard({
         <GoogleIcon />
         <span>Continue with Google</span>
       </Button>
+
+      {onExploreDemo && (
+        <Button
+          type="button"
+          variant="ghost"
+          className="w-full h-9 border border-neutral-800 text-neutral-300 hover:text-white"
+          onClick={onExploreDemo}
+        >
+          <Play className="h-3.5 w-3.5 text-emerald-400" />
+          <span>Explore Demo without signing in</span>
+        </Button>
+      )}
 
       <p className="text-center text-xs text-neutral-400">
         Already have an account?{' '}

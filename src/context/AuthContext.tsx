@@ -25,6 +25,12 @@ import {
   isFirebaseClientConfigured,
 } from '../lib/firebase';
 import { registerSchema } from '../lib/validations';
+import {
+  isDemoPath,
+  isDemoSessionStored,
+  setDemoSessionStored,
+} from '../demo/demo-session';
+import { getDemoProfile, resetDemoWorkspace } from '../demo/demo-store';
 import { syncUserProfile } from '../services/users';
 import type { UserProfile } from '../types/app';
 
@@ -44,6 +50,7 @@ export interface RegisterResult {
 interface AuthContextValue {
   firebaseUser: FirebaseUser | null;
   profile: UserProfile | null;
+  isDemoMode: boolean;
   loading: boolean;
   authError: string | null;
   authConfig: AuthConfig;
@@ -61,6 +68,9 @@ interface AuthContextValue {
     password: string,
     confirmPassword: string
   ) => Promise<void>;
+  enterDemoMode: () => UserProfile;
+  exitDemoMode: () => void;
+  resetDemoMode: () => UserProfile;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   applyTheme: (theme: 'dark' | 'light') => void;
@@ -122,6 +132,7 @@ export function mapFirebaseAuthError(error: unknown, fallback: string): string {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [isDemoMode, setIsDemoMode] = useState(false);
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -189,15 +200,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setFirebaseUser(user);
 
       if (!user || signingOutRef.current) {
-        setProfile(null);
-        applyTheme('dark');
-        setAuthError(null);
+        if (!signingOutRef.current && (isDemoSessionStored() || isDemoPath())) {
+          setDemoSessionStored(true);
+          const demoProfile = getDemoProfile();
+          setIsDemoMode(true);
+          setProfile(demoProfile);
+          applyTheme(demoProfile.themePreference === 'light' ? 'light' : 'dark');
+          setAuthError(null);
+        } else {
+          setDemoSessionStored(false);
+          setIsDemoMode(false);
+          setProfile(null);
+          applyTheme('dark');
+          setAuthError(null);
+        }
         if (!initialResolved) {
           initialResolved = true;
           setLoading(false);
         }
         return;
       }
+
+      // Real Firebase sign-in always supersedes and exits Demo Mode
+      setDemoSessionStored(false);
+      setIsDemoMode(false);
 
       if (!syncLockRef.current) {
         await hydrateUserProfile(user);
@@ -227,6 +253,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     try {
       const cred = await signInWithPopup(auth, googleAuthProvider);
+      setDemoSessionStored(false);
+      setIsDemoMode(false);
       setFirebaseUser(cred.user);
       await hydrateUserProfile(cred.user, undefined, true);
     } catch (err) {
@@ -241,6 +269,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setAuthError(null);
       try {
         const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+        setDemoSessionStored(false);
+        setIsDemoMode(false);
         setFirebaseUser(cred.user);
         const userProfile = await hydrateUserProfile(cred.user, { hasPassword: true }, true);
         if (!userProfile) {
@@ -280,6 +310,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await updateProfile(cred.user, { displayName: parsed.data.name }).catch(
           () => undefined
         );
+        setDemoSessionStored(false);
+        setIsDemoMode(false);
         setFirebaseUser(cred.user);
         const synced = await hydrateUserProfile(
           cred.user,
@@ -338,8 +370,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const enterDemoMode = useCallback((): UserProfile => {
+    setDemoSessionStored(true);
+    const demoProfile = getDemoProfile();
+    setIsDemoMode(true);
+    setProfile(demoProfile);
+    setAuthError(null);
+    applyTheme(demoProfile.themePreference === 'light' ? 'light' : 'dark');
+    return demoProfile;
+  }, [applyTheme]);
+
+  const exitDemoMode = useCallback(() => {
+    setDemoSessionStored(false);
+    setIsDemoMode(false);
+    if (!auth.currentUser) {
+      setProfile(null);
+      setAuthError(null);
+      applyTheme('dark');
+    }
+  }, [applyTheme]);
+
+  const resetDemoMode = useCallback((): UserProfile => {
+    const fresh = resetDemoWorkspace().profile;
+    setDemoSessionStored(true);
+    setIsDemoMode(true);
+    setProfile(fresh);
+    setAuthError(null);
+    applyTheme(fresh.themePreference === 'light' ? 'light' : 'dark');
+    return fresh;
+  }, [applyTheme]);
+
   const signOut = useCallback(async () => {
     signingOutRef.current = true;
+    setDemoSessionStored(false);
+    setIsDemoMode(false);
     try {
       await firebaseSignOut(auth).catch(() => undefined);
     } finally {
@@ -352,13 +416,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [applyTheme]);
 
   const refreshProfile = useCallback(async () => {
+    if (isDemoMode || (!auth.currentUser && isDemoSessionStored())) {
+      const demoProfile = getDemoProfile();
+      setIsDemoMode(true);
+      setProfile(demoProfile);
+      applyTheme(demoProfile.themePreference === 'light' ? 'light' : 'dark');
+      return;
+    }
     const current = auth.currentUser;
     if (!current) {
       setProfile(null);
       return;
     }
     await hydrateUserProfile(current, undefined, false);
-  }, [hydrateUserProfile]);
+  }, [applyTheme, hydrateUserProfile, isDemoMode]);
 
   const clearAuthError = useCallback(() => setAuthError(null), []);
 
@@ -367,6 +438,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       value={{
         firebaseUser,
         profile,
+        isDemoMode,
         loading,
         authError,
         authConfig,
@@ -375,6 +447,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         registerWithEmail,
         requestPasswordReset,
         resetPasswordWithToken,
+        enterDemoMode,
+        exitDemoMode,
+        resetDemoMode,
         signOut,
         refreshProfile,
         applyTheme,

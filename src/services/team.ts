@@ -33,6 +33,23 @@ import {
   requireProjectRole,
   timestampToIso,
 } from './firestore-helpers';
+import {
+  assertNotDemoFirestoreLeak,
+  DEMO_USER_EMAIL,
+  isDemoProfile,
+  isDemoSessionStored,
+} from '../demo/demo-session';
+import {
+  demoAcceptInvitation,
+  demoDeclineInvitation,
+  demoInviteMember,
+  demoListIncomingInvitations,
+  demoListProjectInvitations,
+  demoListWorkspaceTeam,
+  demoRemoveMember,
+  demoRevokeInvitation,
+  demoUpdateMemberRole,
+} from '../demo/demo-store';
 import { getAccessibleProjectsRaw } from './projects';
 
 export interface TeamMemberSummary {
@@ -70,6 +87,10 @@ export async function listWorkspaceTeam(userId: string): Promise<{
   members: TeamMemberSummary[];
   invitations: InvitationItem[];
 }> {
+  if (isDemoProfile(userId)) {
+    return demoListWorkspaceTeam(userId);
+  }
+  assertNotDemoFirestoreLeak(userId);
   const projects = await getAccessibleProjectsRaw(userId);
   const memberMap = new Map<string, TeamMemberSummary>();
 
@@ -187,6 +208,10 @@ export async function listProjectInvitations(
   userId: string,
   projectId: string
 ): Promise<InvitationItem[]> {
+  if (isDemoProfile(userId)) {
+    return demoListProjectInvitations(userId, projectId);
+  }
+  assertNotDemoFirestoreLeak(userId);
   await requireProjectRole(projectId, userId, ['OWNER', 'ADMINISTRATOR']);
 
   const [byOwnerSnap, byInviterSnap] = await Promise.all([
@@ -215,6 +240,9 @@ export async function listProjectInvitations(
 }
 
 export async function listIncomingInvitations(userEmail: string): Promise<InvitationItem[]> {
+  if (userEmail.trim().toLowerCase() === DEMO_USER_EMAIL || isDemoSessionStored()) {
+    return demoListIncomingInvitations(userEmail);
+  }
   const email = userEmail.trim().toLowerCase();
   if (!email) return [];
 
@@ -234,6 +262,10 @@ export async function inviteMember(
   projectId: string,
   input: { email: string; role: 'ADMINISTRATOR' | 'MEMBER' }
 ): Promise<InvitationItem> {
+  if (isDemoProfile(actor)) {
+    return demoInviteMember(actor, projectId, input);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const parsed = inviteMemberSchema.safeParse(input);
   if (!parsed.success) {
     throw new AppError(400, parsed.error.issues[0]?.message || 'Invalid invitation payload.');
@@ -329,6 +361,10 @@ export async function acceptInvitation(
   actor: UserProfile,
   rawToken: string
 ): Promise<{ projectId: string }> {
+  if (isDemoProfile(actor)) {
+    return demoAcceptInvitation(actor, rawToken);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const parsed = acceptInvitationSchema.safeParse({ token: rawToken });
   if (!parsed.success) {
     throw new AppError(400, parsed.error.issues[0]?.message || 'Invitation token is invalid.');
@@ -418,6 +454,10 @@ export async function declineInvitation(
   actor: UserProfile,
   rawToken: string
 ): Promise<void> {
+  if (isDemoProfile(actor)) {
+    return demoDeclineInvitation(actor, rawToken);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const token = rawToken.trim();
   const invRef = doc(firestoreDb, 'invitations', token);
   const invSnap = await getDoc(invRef).catch((err) =>
@@ -449,6 +489,10 @@ export async function revokeInvitation(
   actor: UserProfile,
   token: string
 ): Promise<void> {
+  if (isDemoProfile(actor)) {
+    return demoRevokeInvitation(actor, token);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const invRef = doc(firestoreDb, 'invitations', token);
   const invSnap = await getDoc(invRef).catch((err) =>
     handleFirestoreError(err, OperationType.GET, `invitations/${token}`)
@@ -481,6 +525,10 @@ export async function updateMemberRole(
   targetUserId: string,
   role: 'ADMINISTRATOR' | 'MEMBER'
 ): Promise<void> {
+  if (isDemoProfile(actor)) {
+    return demoUpdateMemberRole(actor, projectId, targetUserId, role);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const parsed = updateMemberRoleSchema.safeParse({ role });
   if (!parsed.success) {
     throw new AppError(400, 'Invalid member role.');
@@ -539,6 +587,10 @@ export async function removeMember(
   projectId: string,
   targetUserId: string
 ): Promise<void> {
+  if (isDemoProfile(actor)) {
+    return demoRemoveMember(actor, projectId, targetUserId);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const actorRole = await requireProjectRole(projectId, actor.uid);
 
   const memberRef = doc(firestoreDb, 'projects', projectId, 'members', targetUserId);

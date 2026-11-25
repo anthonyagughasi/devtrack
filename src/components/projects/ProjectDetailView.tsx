@@ -54,7 +54,7 @@ export function ProjectDetailView({
   refreshTrigger,
   onDataChanged,
 }: ProjectDetailViewProps) {
-  const { profile } = useAuth();
+  const { profile, isDemoMode } = useAuth();
   const { showToast } = useToast();
 
   const [data, setData] = useState<ProjectDetailResult | null>(null);
@@ -138,8 +138,9 @@ export function ProjectDetailView({
         role: inviteRole,
       });
 
-      const statusMsg =
-        "Invitation created. It will appear in the recipient's DevTrack account when they sign in with that email, or you can share the invite token.";
+      const statusMsg = isDemoMode
+        ? 'Simulated invitation created locally in Demo Mode (no email is sent).'
+        : "Invitation created. It will appear in the recipient's DevTrack account when they sign in with that email, or you can share the invite token.";
 
       showToast(statusMsg, 'success');
       setInviteEmail('');

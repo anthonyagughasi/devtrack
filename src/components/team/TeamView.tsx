@@ -31,7 +31,7 @@ export function TeamView({
   refreshTrigger,
   onDataChanged,
 }: TeamViewProps) {
-  const { profile } = useAuth();
+  const { profile, isDemoMode } = useAuth();
   const { showToast } = useToast();
   const [members, setMembers] = useState<TeamMemberSummary[]>([]);
   const [outgoingInvites, setOutgoingInvites] = useState<InvitationItem[]>([]);
@@ -94,8 +94,9 @@ export function TeamView({
         role: inviteRole,
       });
 
-      const statusText =
-        "Invitation created. It will appear in the recipient's DevTrack account when they sign in with that email, or you can copy the invite token below.";
+      const statusText = isDemoMode
+        ? 'Simulated invitation created locally in Demo Mode (no email is sent). You can copy the sample invite token or revoke it below.'
+        : "Invitation created. It will appear in the recipient's DevTrack account when they sign in with that email, or you can copy the invite token below.";
 
       setInviteFeedback({ type: 'success', text: statusText });
       showToast(statusText, 'success');

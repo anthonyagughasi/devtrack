@@ -3,6 +3,8 @@ import { firestoreDb, handleFirestoreError, OperationType } from '../lib/firebas
 import { isOverdue } from '../lib/utils';
 import type { TaskPriority, TaskStatus } from '../lib/validations';
 import type { ActivityItem, DashboardAnalytics } from '../types/app';
+import { assertNotDemoFirestoreLeak, isDemoProfile } from '../demo/demo-session';
+import { demoGetDashboardAnalytics } from '../demo/demo-store';
 import { nullableIso, timestampToIso } from './firestore-helpers';
 import { getAccessibleProjectsRaw } from './projects';
 
@@ -10,6 +12,10 @@ export async function getDashboardAnalytics(
   userId: string,
   days = 14
 ): Promise<DashboardAnalytics> {
+  if (isDemoProfile(userId)) {
+    return demoGetDashboardAnalytics(userId, days);
+  }
+  assertNotDemoFirestoreLeak(userId);
   const safeDays = Math.min(90, Math.max(7, Number.isFinite(days) ? days : 14));
   const projects = await getAccessibleProjectsRaw(userId);
 

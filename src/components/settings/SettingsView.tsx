@@ -4,6 +4,7 @@ import {
   KeyRound,
   LogOut,
   Moon,
+  RotateCcw,
   Sun,
   Trash2,
   Upload,
@@ -17,6 +18,11 @@ import {
 } from 'firebase/auth';
 import { mapFirebaseAuthError, useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import {
+  removeDemoAvatar,
+  updateDemoProfileSettings,
+  uploadDemoAvatarFile,
+} from '../../demo/demo-store';
 import { formatClientError } from '../../lib/firebase';
 import { cn, formatDate } from '../../lib/utils';
 import { strongPasswordSchema } from '../../lib/validations';
@@ -31,8 +37,13 @@ import { Button } from '../ui/Button';
 const ALLOWED_AVATAR_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 
-export function SettingsView() {
-  const { firebaseUser, profile, refreshProfile, applyTheme, signOut } = useAuth();
+interface SettingsViewProps {
+  onResetDemo?: () => void;
+  onExitDemo?: () => void;
+}
+
+export function SettingsView({ onResetDemo, onExitDemo }: SettingsViewProps) {
+  const { firebaseUser, profile, isDemoMode, refreshProfile, applyTheme, signOut } = useAuth();
   const { showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -65,7 +76,7 @@ export function SettingsView() {
   const handleAvatarFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
-    if (!file || !firebaseUser) return;
+    if (!file || (!firebaseUser && !isDemoMode)) return;
 
     setAvatarError(null);
     const normalizedType = file.type === 'image/jpg' ? 'image/jpeg' : file.type;
@@ -84,7 +95,11 @@ export function SettingsView() {
 
     setUploadingAvatar(true);
     try {
-      await uploadUserAvatarFile(firebaseUser, file);
+      if (isDemoMode) {
+        await uploadDemoAvatarFile(file);
+      } else if (firebaseUser) {
+        await uploadUserAvatarFile(firebaseUser, file);
+      }
       await refreshProfile();
       showToast('Profile picture updated.', 'success');
     } catch (err) {
@@ -97,11 +112,15 @@ export function SettingsView() {
   };
 
   const handleRemoveAvatar = async () => {
-    if (!firebaseUser) return;
+    if (!firebaseUser && !isDemoMode) return;
     setAvatarError(null);
     setRemovingAvatar(true);
     try {
-      await removeUserAvatar(firebaseUser);
+      if (isDemoMode) {
+        removeDemoAvatar();
+      } else if (firebaseUser) {
+        await removeUserAvatar(firebaseUser);
+      }
       await refreshProfile();
       showToast('Profile picture removed.', 'success');
     } catch (err) {
@@ -115,7 +134,7 @@ export function SettingsView() {
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!firebaseUser) return;
+    if (!firebaseUser && !isDemoMode) return;
     if (name.trim().length < 2) {
       showToast('Display name must be at least 2 characters.', 'error');
       return;
@@ -123,15 +142,26 @@ export function SettingsView() {
     setSaving(true);
     try {
       const trimmedName = name.trim();
-      await updateProfile(firebaseUser, { displayName: trimmedName }).catch(() => undefined);
-      await updateUserProfileSettings(firebaseUser, {
-        name: trimmedName,
-        themePreference,
-        notifyOnAssign,
-        notifyOnComment,
-        notifyOnInvite,
-        notifyOnDeadline,
-      });
+      if (isDemoMode) {
+        updateDemoProfileSettings({
+          name: trimmedName,
+          themePreference,
+          notifyOnAssign,
+          notifyOnComment,
+          notifyOnInvite,
+          notifyOnDeadline,
+        });
+      } else if (firebaseUser) {
+        await updateProfile(firebaseUser, { displayName: trimmedName }).catch(() => undefined);
+        await updateUserProfileSettings(firebaseUser, {
+          name: trimmedName,
+          themePreference,
+          notifyOnAssign,
+          notifyOnComment,
+          notifyOnInvite,
+          notifyOnDeadline,
+        });
+      }
       applyTheme(themePreference);
       await refreshProfile();
       showToast('Preferences saved.', 'success');
@@ -144,6 +174,13 @@ export function SettingsView() {
 
   const handlePasswordUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isDemoMode) {
+      showToast(
+        'Password changes are disabled in Demo Mode. Sign in with an account to manage security credentials.',
+        'info'
+      );
+      return;
+    }
     const strengthCheck = strongPasswordSchema.safeParse(newPassword);
     if (!strengthCheck.success) {
       showToast(
@@ -373,16 +410,25 @@ export function SettingsView() {
         onSubmit={handlePasswordUpdate}
         className="rounded-xl border border-neutral-200 dark:border-neutral-800/80 bg-white dark:bg-[#111318] p-6 space-y-4"
       >
-        <div className="flex items-center gap-2">
-          <KeyRound className="h-4 w-4 text-blue-500" />
-          <h3 className="font-display text-sm font-semibold">
-            {profile.hasPassword ? 'Change Password' : 'Set Account Password'}
-          </h3>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <KeyRound className="h-4 w-4 text-blue-500" />
+            <h3 className="font-display text-sm font-semibold">
+              {profile.hasPassword ? 'Change Password' : 'Set Account Password'}
+            </h3>
+          </div>
+          {isDemoMode && (
+            <span className="font-mono text-[10px] uppercase tracking-wider px-2 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300">
+              Disabled in Demo
+            </span>
+          )}
         </div>
         <p className="text-xs text-neutral-500">
-          {profile.hasPassword
-            ? 'Update the password used for email sign-in. Passwords must be at least 8 characters and include uppercase, lowercase, and numeric characters.'
-            : 'Add a password so you can also sign in directly with your email address.'}
+          {isDemoMode
+            ? 'Password updates are safely simulated/disabled in Demo Mode because no Firebase Auth session is created.'
+            : profile.hasPassword
+              ? 'Update the password used for email sign-in. Passwords must be at least 8 characters and include uppercase, lowercase, and numeric characters.'
+              : 'Add a password so you can also sign in directly with your email address.'}
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -393,11 +439,12 @@ export function SettingsView() {
               </label>
               <input
                 type="password"
-                required
+                required={!isDemoMode}
+                disabled={isDemoMode}
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
                 autoComplete="current-password"
-                className="w-full h-9 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#0D0F14] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full h-9 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#0D0F14] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
               />
             </div>
           )}
@@ -408,11 +455,12 @@ export function SettingsView() {
             </label>
             <input
               type="password"
-              required
+              required={!isDemoMode}
+              disabled={isDemoMode}
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
               autoComplete="new-password"
-              className="w-full h-9 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#0D0F14] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full h-9 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#0D0F14] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             />
           </div>
 
@@ -422,18 +470,28 @@ export function SettingsView() {
             </label>
             <input
               type="password"
-              required
+              required={!isDemoMode}
+              disabled={isDemoMode}
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               autoComplete="new-password"
-              className="w-full h-9 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#0D0F14] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full h-9 rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#0D0F14] px-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             />
           </div>
         </div>
 
         <div className="flex justify-end">
-          <Button type="submit" variant="secondary" loading={savingPassword}>
-            {profile.hasPassword ? 'Update Password' : 'Set Password'}
+          <Button
+            type="submit"
+            variant="secondary"
+            loading={savingPassword}
+            disabled={isDemoMode}
+          >
+            {isDemoMode
+              ? 'Simulated in Demo'
+              : profile.hasPassword
+                ? 'Update Password'
+                : 'Set Password'}
           </Button>
         </div>
       </form>
@@ -441,15 +499,17 @@ export function SettingsView() {
       {/* Account Summary */}
       <div className="rounded-xl border border-neutral-200 dark:border-neutral-800/80 bg-white dark:bg-[#111318] p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="space-y-1.5">
-          <h3 className="font-display text-sm font-semibold">Account</h3>
+          <h3 className="font-display text-sm font-semibold">
+            {isDemoMode ? 'Demo Session' : 'Account'}
+          </h3>
           <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-500">
             <span>
-              Signed in as{' '}
+              {isDemoMode ? 'Exploring as ' : 'Signed in as '}
               <span className="font-medium text-neutral-800 dark:text-neutral-200">
                 {profile.email}
               </span>
             </span>
-            {profile.emailVerified && (
+            {!isDemoMode && profile.emailVerified && (
               <span className="inline-flex items-center gap-1 text-emerald-500 font-medium">
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 Verified
@@ -457,18 +517,39 @@ export function SettingsView() {
             )}
           </div>
           <p className="font-mono text-[11px] text-neutral-400 tabular-nums">
-            Member since {formatDate(profile.createdAt)}
+            {isDemoMode
+              ? 'Changes persist in local browser storage only'
+              : `Member since ${formatDate(profile.createdAt)}`}
           </p>
         </div>
 
-        <Button
-          variant="secondary"
-          onClick={() => signOut()}
-          className="text-red-500 hover:text-red-400"
-        >
-          <LogOut className="h-3.5 w-3.5" />
-          <span>Sign Out</span>
-        </Button>
+        {isDemoMode ? (
+          <div className="flex items-center gap-2">
+            {onResetDemo && (
+              <Button variant="secondary" onClick={onResetDemo}>
+                <RotateCcw className="h-3.5 w-3.5" />
+                <span>Reset Demo</span>
+              </Button>
+            )}
+            <Button
+              variant="secondary"
+              onClick={() => onExitDemo?.()}
+              className="text-red-500 hover:text-red-400"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span>Exit Demo</span>
+            </Button>
+          </div>
+        ) : (
+          <Button
+            variant="secondary"
+            onClick={() => signOut()}
+            className="text-red-500 hover:text-red-400"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            <span>Sign Out</span>
+          </Button>
+        )}
       </div>
     </div>
   );

@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   FolderKanban,
   Lock,
+  Play,
   ShieldCheck,
   Users,
 } from 'lucide-react';
@@ -51,9 +52,10 @@ const PREVIEW_TASKS = [
 
 interface LandingPageProps {
   onNavigateAuth: (route: AuthRoute) => void;
+  onExploreDemo: () => void;
 }
 
-export function LandingPage({ onNavigateAuth }: LandingPageProps) {
+export function LandingPage({ onNavigateAuth, onExploreDemo }: LandingPageProps) {
   const { signInWithGoogle, authConfig, authError } = useAuth();
   const { showToast } = useToast();
   const [signingIn, setSigningIn] = useState(false);
@@ -125,6 +127,15 @@ export function LandingPage({ onNavigateAuth }: LandingPageProps) {
 
           <div className="flex items-center gap-2.5 shrink-0">
             <Button
+              variant="secondary"
+              size="sm"
+              onClick={onExploreDemo}
+              className="whitespace-nowrap shrink-0"
+            >
+              <Play className="h-3.5 w-3.5" />
+              <span>Explore Demo</span>
+            </Button>
+            <Button
               variant="ghost"
               size="sm"
               onClick={() => onNavigateAuth('login')}
@@ -174,6 +185,14 @@ export function LandingPage({ onNavigateAuth }: LandingPageProps) {
                 <Button size="lg" onClick={() => onNavigateAuth('register')}>
                   <span>Create free account</span>
                   <ArrowRight className="h-4 w-4" />
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="lg"
+                  onClick={onExploreDemo}
+                >
+                  <Play className="h-4 w-4" />
+                  <span>Explore Demo</span>
                 </Button>
                 <Button
                   variant="secondary"
@@ -466,6 +485,13 @@ export function LandingPage({ onNavigateAuth }: LandingPageProps) {
             >
               Analytics
             </a>
+            <button
+              type="button"
+              onClick={onExploreDemo}
+              className="text-emerald-400 hover:text-emerald-300 font-medium cursor-pointer"
+            >
+              Explore Demo
+            </button>
             <button
               type="button"
               onClick={() => onNavigateAuth('login')}

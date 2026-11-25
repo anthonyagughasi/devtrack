@@ -43,6 +43,18 @@ import {
   requireProjectRole,
   timestampToIso,
 } from './firestore-helpers';
+import { assertNotDemoFirestoreLeak, isDemoProfile } from '../demo/demo-session';
+import {
+  demoAddTaskComment,
+  demoCreateTask,
+  demoDeleteTask,
+  demoDeleteTaskComment,
+  demoGetTaskDetails,
+  demoListUserTasks,
+  demoMoveTask,
+  demoUpdateTask,
+  demoUpdateTaskComment,
+} from '../demo/demo-store';
 import { sendProjectNotification } from './notifications';
 import { getAccessibleProjectsRaw } from './projects';
 
@@ -116,6 +128,10 @@ export async function listUserTasks(
     sort?: string;
   }
 ): Promise<TaskItem[]> {
+  if (isDemoProfile(userId)) {
+    return demoListUserTasks(userId, filters);
+  }
+  assertNotDemoFirestoreLeak(userId);
   const projects = await getAccessibleProjectsRaw(userId);
   const targetProjects =
     filters?.projectId && filters.projectId !== 'ALL'
@@ -251,6 +267,10 @@ export async function createTask(
     assigneeId?: string | null;
   }
 ): Promise<{ id: string; projectId: string }> {
+  if (isDemoProfile(actor)) {
+    return demoCreateTask(actor, input);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const parsed = createTaskSchema.safeParse(input);
   if (!parsed.success) {
     throw new AppError(400, parsed.error.issues[0]?.message || 'Invalid task input.');
@@ -361,6 +381,10 @@ export async function getTaskDetails(
   activities: ActivityItem[];
   projectMembers: ProjectMemberItem[];
 }> {
+  if (isDemoProfile(userId)) {
+    return demoGetTaskDetails(userId, taskId, projectIdHint);
+  }
+  assertNotDemoFirestoreLeak(userId);
   const { projectId, taskSnap } = await findTaskLocation(userId, taskId, projectIdHint);
   await requireProjectRole(projectId, userId);
 
@@ -488,6 +512,10 @@ export async function updateTask(
   },
   projectIdHint?: string
 ): Promise<void> {
+  if (isDemoProfile(actor)) {
+    return demoUpdateTask(actor, taskId, input, projectIdHint);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const parsed = updateTaskSchema.safeParse(input);
   if (!parsed.success) {
     throw new AppError(400, parsed.error.issues[0]?.message || 'Invalid task update.');
@@ -597,6 +625,10 @@ export async function moveTask(
   input: { status: TaskStatus; position: number },
   projectIdHint?: string
 ): Promise<void> {
+  if (isDemoProfile(actor)) {
+    return demoMoveTask(actor, taskId, input, projectIdHint);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const parsed = moveTaskSchema.safeParse(input);
   if (!parsed.success) {
     throw new AppError(400, parsed.error.issues[0]?.message || 'Invalid move payload.');
@@ -656,6 +688,10 @@ export async function deleteTask(
   taskId: string,
   projectIdHint?: string
 ): Promise<void> {
+  if (isDemoProfile(actor)) {
+    return demoDeleteTask(actor, taskId, projectIdHint);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const { projectId, taskSnap } = await findTaskLocation(actor.uid, taskId, projectIdHint);
   await requireProjectRole(projectId, actor.uid);
 
@@ -708,6 +744,10 @@ export async function addTaskComment(
   content: string,
   projectIdHint?: string
 ): Promise<TaskCommentItem> {
+  if (isDemoProfile(actor)) {
+    return demoAddTaskComment(actor, taskId, content, projectIdHint);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const parsed = commentSchema.safeParse({ content });
   if (!parsed.success) {
     throw new AppError(400, parsed.error.issues[0]?.message || 'Comment cannot be empty.');
@@ -808,6 +848,10 @@ export async function updateTaskComment(
   commentId: string,
   content: string
 ): Promise<void> {
+  if (isDemoProfile(actor)) {
+    return demoUpdateTaskComment(actor, projectId, taskId, commentId, content);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const parsed = commentSchema.safeParse({ content });
   if (!parsed.success) {
     throw new AppError(400, parsed.error.issues[0]?.message || 'Comment cannot be empty.');
@@ -851,6 +895,10 @@ export async function deleteTaskComment(
   taskId: string,
   commentId: string
 ): Promise<void> {
+  if (isDemoProfile(actor)) {
+    return demoDeleteTaskComment(actor, projectId, taskId, commentId);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const role = await requireProjectRole(projectId, actor.uid);
 
   const ref = doc(firestoreDb, 'projects', projectId, 'tasks', taskId, 'comments', commentId);

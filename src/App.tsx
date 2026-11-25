@@ -5,7 +5,9 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { ToastProvider } from './context/ToastContext';
+import { ToastProvider, useToast } from './context/ToastContext';
+import { isDemoPath } from './demo/demo-session';
+import { loadDemoWorkspace } from './demo/demo-store';
 import { AppShell, type NavRoute } from './components/layout/AppShell';
 import { LandingPage } from './components/marketing/LandingPage';
 import { AuthViews, type AuthRoute } from './components/auth/AuthViews';
@@ -25,6 +27,60 @@ const PATH_TO_AUTH_ROUTE: Record<string, AuthRoute> = {
   '/forgot-password': 'forgot-password',
   '/reset-password': 'reset-password',
 };
+
+function parseDemoLocation(): {
+  route: NavRoute;
+  projectId: string | null;
+  taskId?: string;
+} {
+  if (typeof window === 'undefined') {
+    return { route: 'dashboard', projectId: null };
+  }
+  const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
+  const params = new URLSearchParams(window.location.search);
+  const taskId = params.get('task')?.trim() || undefined;
+
+  if (pathname === '/demo') {
+    return { route: 'dashboard', projectId: null };
+  }
+  const projectDetailMatch = pathname.match(/^\/demo\/projects\/([^/]+)$/);
+  if (projectDetailMatch) {
+    return {
+      route: 'projects',
+      projectId: decodeURIComponent(projectDetailMatch[1]),
+      taskId,
+    };
+  }
+  if (pathname === '/demo/projects') {
+    return { route: 'projects', projectId: null };
+  }
+  if (pathname === '/demo/tasks') {
+    return { route: 'tasks', projectId: null };
+  }
+  if (pathname === '/demo/team') {
+    return { route: 'team', projectId: null };
+  }
+  if (pathname === '/demo/activity') {
+    return { route: 'activity', projectId: null };
+  }
+  if (pathname === '/demo/settings') {
+    return { route: 'settings', projectId: null };
+  }
+  return { route: 'dashboard', projectId: null };
+}
+
+function demoRouteToUrl(route: NavRoute, projectId?: string | null, taskId?: string): string {
+  let base = '/demo';
+  if (route === 'projects') {
+    base = projectId ? `/demo/projects/${encodeURIComponent(projectId)}` : '/demo/projects';
+  } else if (route !== 'dashboard') {
+    base = `/demo/${route}`;
+  }
+  if (route === 'projects' && projectId && taskId) {
+    return `${base}?task=${encodeURIComponent(taskId)}`;
+  }
+  return base;
+}
 
 function parseAuthLocation(): { route: AuthRoute; token?: string } {
   if (typeof window === 'undefined') {
@@ -66,10 +122,29 @@ function authRouteToPath(route: AuthRoute, token?: string): string {
 }
 
 function WorkspaceRouter() {
-  const { profile, loading, authError, refreshProfile, signOut, clearAuthError } = useAuth();
-  const [route, setRoute] = useState<NavRoute>('dashboard');
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [initialTaskId, setInitialTaskId] = useState<string | undefined>(undefined);
+  const {
+    firebaseUser,
+    profile,
+    isDemoMode,
+    loading,
+    authError,
+    enterDemoMode,
+    exitDemoMode,
+    resetDemoMode,
+    refreshProfile,
+    signOut,
+    clearAuthError,
+  } = useAuth();
+  const { showToast } = useToast();
+
+  const initialDemo = isDemoPath() ? parseDemoLocation() : null;
+  const [route, setRoute] = useState<NavRoute>(() => initialDemo?.route ?? 'dashboard');
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
+    () => initialDemo?.projectId ?? null
+  );
+  const [initialTaskId, setInitialTaskId] = useState<string | undefined>(
+    () => initialDemo?.taskId
+  );
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
@@ -80,10 +155,21 @@ function WorkspaceRouter() {
   useEffect(() => {
     const onPopState = () => {
       setAuthLoc(parseAuthLocation());
+      if (isDemoPath()) {
+        if (!firebaseUser) {
+          enterDemoMode();
+          const parsedDemo = parseDemoLocation();
+          setRoute(parsedDemo.route);
+          setSelectedProjectId(parsedDemo.projectId);
+          setInitialTaskId(parsedDemo.taskId);
+        }
+      } else if (isDemoMode && !firebaseUser) {
+        exitDemoMode();
+      }
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
-  }, []);
+  }, [enterDemoMode, exitDemoMode, firebaseUser, isDemoMode]);
 
   const navigateAuth = useCallback((next: AuthRoute, token?: string) => {
     clearAuthError();
@@ -94,7 +180,7 @@ function WorkspaceRouter() {
     setAuthLoc({ route: next, token });
   }, [clearAuthError]);
 
-  // Normalize /login, /register, /forgot-password URL once authenticated
+  // Normalize /login, /register, /forgot-password (or /demo* for real authenticated accounts)
   useEffect(() => {
     if (
       profile &&
@@ -102,10 +188,21 @@ function WorkspaceRouter() {
         authLoc.route === 'register' ||
         authLoc.route === 'forgot-password')
     ) {
-      window.history.replaceState({}, '', '/');
+      const targetUrl = isDemoMode ? '/demo' : '/';
+      window.history.replaceState({}, '', targetUrl);
       setAuthLoc({ route: 'landing' });
+    } else if (firebaseUser && !isDemoMode && isDemoPath()) {
+      window.history.replaceState({}, '', '/');
     }
-  }, [profile, authLoc.route]);
+  }, [profile, firebaseUser, isDemoMode, authLoc.route]);
+
+  // Ensure Demo Mode URL stays under /demo while active
+  useEffect(() => {
+    if (isDemoMode && !isDemoPath()) {
+      const targetUrl = demoRouteToUrl(route, selectedProjectId, initialTaskId);
+      window.history.replaceState({}, '', targetUrl);
+    }
+  }, [isDemoMode, route, selectedProjectId, initialTaskId]);
 
   const bumpRefresh = useCallback(() => {
     setRefreshTrigger((n) => n + 1);
@@ -114,19 +211,64 @@ function WorkspaceRouter() {
   const handleNavigate = useCallback(
     (nextRoute: NavRoute, projectId?: string, taskId?: string) => {
       setRoute(nextRoute);
-      if (nextRoute === 'projects' && projectId) {
-        setSelectedProjectId(projectId);
-        setInitialTaskId(taskId);
-      } else if (nextRoute !== 'projects') {
-        setSelectedProjectId(null);
-        setInitialTaskId(undefined);
-      } else {
-        setSelectedProjectId(null);
-        setInitialTaskId(undefined);
+      const nextProj = nextRoute === 'projects' && projectId ? projectId : null;
+      const nextTask = nextRoute === 'projects' && projectId ? taskId : undefined;
+      setSelectedProjectId(nextProj);
+      setInitialTaskId(nextTask);
+
+      if (isDemoMode && typeof window !== 'undefined') {
+        const nextUrl = demoRouteToUrl(nextRoute, nextProj, nextTask);
+        if (window.location.pathname + window.location.search !== nextUrl) {
+          window.history.pushState({}, '', nextUrl);
+        }
       }
     },
-    []
+    [isDemoMode]
   );
+
+  const handleExploreDemo = useCallback(() => {
+    clearAuthError();
+    enterDemoMode();
+    setRoute('dashboard');
+    setSelectedProjectId(null);
+    setInitialTaskId(undefined);
+    setAuthLoc({ route: 'landing' });
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', '/demo');
+    }
+    bumpRefresh();
+    showToast('Entered interactive Demo Mode. Changes are saved locally in your browser.', 'info');
+  }, [bumpRefresh, clearAuthError, enterDemoMode, showToast]);
+
+  const handleExitDemo = useCallback(() => {
+    exitDemoMode();
+    setRoute('dashboard');
+    setSelectedProjectId(null);
+    setInitialTaskId(undefined);
+    setNewProjectOpen(false);
+    setAuthLoc({ route: 'landing' });
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', '/');
+    }
+    showToast('Exited Demo Mode.', 'info');
+  }, [exitDemoMode, showToast]);
+
+  const handleResetDemo = useCallback(() => {
+    resetDemoMode();
+    const freshWorkspace = loadDemoWorkspace();
+    if (
+      selectedProjectId &&
+      !freshWorkspace.projects.some((p) => p.id === selectedProjectId)
+    ) {
+      setSelectedProjectId(null);
+      setInitialTaskId(undefined);
+      if (typeof window !== 'undefined') {
+        window.history.replaceState({}, '', '/demo/projects');
+      }
+    }
+    bumpRefresh();
+    showToast('Demo workspace restored to original sample data.', 'success');
+  }, [bumpRefresh, resetDemoMode, selectedProjectId, showToast]);
 
   if (loading) {
     return (
@@ -146,6 +288,7 @@ function WorkspaceRouter() {
         route={authLoc.route}
         initialToken={authLoc.token}
         onNavigate={navigateAuth}
+        onExploreDemo={handleExploreDemo}
         onCompleteAuth={() => navigateAuth('landing')}
       />
     );
@@ -187,11 +330,12 @@ function WorkspaceRouter() {
           route={authLoc.route}
           initialToken={authLoc.token}
           onNavigate={navigateAuth}
+          onExploreDemo={handleExploreDemo}
           onCompleteAuth={() => navigateAuth('landing')}
         />
       );
     }
-    return <LandingPage onNavigateAuth={navigateAuth} />;
+    return <LandingPage onNavigateAuth={navigateAuth} onExploreDemo={handleExploreDemo} />;
   }
 
   const breadcrumbMap: Record<NavRoute, string> = {
@@ -209,6 +353,8 @@ function WorkspaceRouter() {
       breadcrumb={breadcrumbMap[route]}
       onNavigate={handleNavigate}
       onNewProject={() => setNewProjectOpen(true)}
+      onResetDemo={handleResetDemo}
+      onExitDemo={handleExitDemo}
       refreshTrigger={refreshTrigger}
     >
       {route === 'dashboard' && (
@@ -226,10 +372,7 @@ function WorkspaceRouter() {
         <ProjectDetailView
           projectId={selectedProjectId}
           initialTaskId={initialTaskId}
-          onBack={() => {
-            setSelectedProjectId(null);
-            setInitialTaskId(undefined);
-          }}
+          onBack={() => handleNavigate('projects')}
           refreshTrigger={refreshTrigger}
           onDataChanged={bumpRefresh}
         />
@@ -237,10 +380,7 @@ function WorkspaceRouter() {
 
       {route === 'projects' && !selectedProjectId && (
         <ProjectsView
-          onSelectProject={(id) => {
-            setSelectedProjectId(id);
-            setInitialTaskId(undefined);
-          }}
+          onSelectProject={(id) => handleNavigate('projects', id)}
           onNewProject={() => setNewProjectOpen(true)}
           refreshTrigger={refreshTrigger}
           onDataChanged={bumpRefresh}
@@ -270,7 +410,9 @@ function WorkspaceRouter() {
         />
       )}
 
-      {route === 'settings' && <SettingsView />}
+      {route === 'settings' && (
+        <SettingsView onResetDemo={handleResetDemo} onExitDemo={handleExitDemo} />
+      )}
 
       <ProjectFormModal
         open={newProjectOpen}

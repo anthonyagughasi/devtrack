@@ -31,6 +31,15 @@ import type {
   UserProfile,
   UserSummary,
 } from '../types/app';
+import { assertNotDemoFirestoreLeak, isDemoProfile } from '../demo/demo-session';
+import {
+  demoCreateProject,
+  demoDeleteProject,
+  demoGetProjectDetails,
+  demoListUserProjects,
+  demoSeedStarterWorkspace,
+  demoUpdateProject,
+} from '../demo/demo-store';
 import {
   addActivityToBatch,
   commitOperationsInChunks,
@@ -58,6 +67,7 @@ export interface AccessibleProjectRaw {
 export async function getAccessibleProjectsRaw(
   userId: string
 ): Promise<AccessibleProjectRaw[]> {
+  assertNotDemoFirestoreLeak(userId);
   const refsPath = `users/${userId}/projectRefs`;
   let refsSnap;
   try {
@@ -115,6 +125,10 @@ export async function listUserProjects(
   userId: string,
   filters?: { q?: string; status?: string }
 ): Promise<ProjectSummary[]> {
+  if (isDemoProfile(userId)) {
+    return demoListUserProjects(userId, filters);
+  }
+  assertNotDemoFirestoreLeak(userId);
   const rawProjects = await getAccessibleProjectsRaw(userId);
   const queryText = filters?.q?.trim().toLowerCase() ?? '';
   const statusFilter = filters?.status?.trim() ?? '';
@@ -198,6 +212,10 @@ export async function createProject(
     deadline?: string | null;
   }
 ): Promise<{ id: string; name: string }> {
+  if (isDemoProfile(actor)) {
+    return demoCreateProject(actor, input);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const parsed = createProjectSchema.safeParse(input);
   if (!parsed.success) {
     throw new AppError(400, parsed.error.issues[0]?.message || 'Invalid project input.');
@@ -288,6 +306,10 @@ export async function getProjectDetails(
   userId: string,
   projectId: string
 ): Promise<ProjectDetailResult> {
+  if (isDemoProfile(userId)) {
+    return demoGetProjectDetails(userId, projectId);
+  }
+  assertNotDemoFirestoreLeak(userId);
   const role = await requireProjectRole(projectId, userId);
 
   const [projSnap, membersSnap, tasksSnap, activitiesSnap] = await Promise.all([
@@ -464,6 +486,10 @@ export async function updateProject(
     deadline?: string | null;
   }
 ): Promise<{ id: string }> {
+  if (isDemoProfile(actor)) {
+    return demoUpdateProject(actor, projectId, input);
+  }
+  assertNotDemoFirestoreLeak(actor);
   await requireProjectRole(projectId, actor.uid, ['OWNER', 'ADMINISTRATOR']);
 
   const parsed = updateProjectSchema.safeParse(input);
@@ -520,6 +546,10 @@ export async function updateProject(
 }
 
 export async function deleteProject(actor: UserProfile, projectId: string): Promise<void> {
+  if (isDemoProfile(actor)) {
+    return demoDeleteProject(actor, projectId);
+  }
+  assertNotDemoFirestoreLeak(actor);
   await requireProjectRole(projectId, actor.uid, ['OWNER']);
 
   const [tasksSnap, activitiesSnap, membersSnap, invitationsSnap] = await Promise.all([
@@ -610,6 +640,10 @@ export async function deleteProject(actor: UserProfile, projectId: string): Prom
 }
 
 export async function seedStarterWorkspace(actor: UserProfile): Promise<{ seeded: boolean }> {
+  if (isDemoProfile(actor)) {
+    return demoSeedStarterWorkspace(actor);
+  }
+  assertNotDemoFirestoreLeak(actor);
   const existing = await getAccessibleProjectsRaw(actor.uid);
   if (existing.length > 0) {
     return { seeded: false };

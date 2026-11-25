@@ -17,6 +17,7 @@ import {
   handleFirestoreError,
   OperationType,
 } from '../lib/firebase';
+import { assertNotDemoFirestoreLeak } from '../demo/demo-session';
 import type { UserProfile } from '../types/app';
 import { timestampToIso } from './firestore-helpers';
 
@@ -57,6 +58,7 @@ export async function syncUserProfile(
   overrides?: { displayName?: string; hasPassword?: boolean }
 ): Promise<UserProfile> {
   const uid = firebaseUser.uid;
+  assertNotDemoFirestoreLeak(uid);
   const userPath = `users/${uid}`;
   const userRef = doc(firestoreDb, 'users', uid);
 
@@ -191,6 +193,7 @@ export async function updateUserProfileSettings(
   }
 ): Promise<UserProfile> {
   const uid = firebaseUser.uid;
+  assertNotDemoFirestoreLeak(uid);
   const userPath = `users/${uid}`;
   const userRef = doc(firestoreDb, 'users', uid);
 

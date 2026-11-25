@@ -9,7 +9,9 @@ import {
   LogOut,
   Menu,
   Plus,
+  RotateCcw,
   Settings,
+  Sparkles,
   Users,
   X,
 } from 'lucide-react';
@@ -39,6 +41,8 @@ interface AppShellProps {
   breadcrumb: string;
   onNavigate: (route: NavRoute, projectId?: string, taskId?: string) => void;
   onNewProject: () => void;
+  onResetDemo?: () => void;
+  onExitDemo?: () => void;
   children: React.ReactNode;
   refreshTrigger?: number;
 }
@@ -57,10 +61,12 @@ export function AppShell({
   breadcrumb,
   onNavigate,
   onNewProject,
+  onResetDemo,
+  onExitDemo,
   children,
   refreshTrigger = 0,
 }: AppShellProps) {
-  const { profile, signOut } = useAuth();
+  const { profile, isDemoMode, signOut } = useAuth();
   const { showToast } = useToast();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
@@ -134,6 +140,10 @@ export function AppShell({
   };
 
   const handleSignOut = async () => {
+    if (isDemoMode) {
+      onExitDemo?.();
+      return;
+    }
     try {
       await signOut();
       showToast('Signed out cleanly.', 'info');
@@ -194,6 +204,12 @@ export function AppShell({
       </nav>
 
       <div className="p-3 border-t border-neutral-200 dark:border-neutral-800/80">
+        {isDemoMode && (
+          <div className="mb-2 px-2 py-1 rounded border border-amber-500/30 bg-amber-500/10 text-[10px] font-mono font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-300 flex items-center justify-between">
+            <span>Demo Mode</span>
+            <span>Local Only</span>
+          </div>
+        )}
         <div className="flex items-center gap-3 px-2 py-2">
           <Avatar src={profile?.avatar} name={profile?.name ?? 'User'} size="sm" />
           <div className="min-w-0 flex-1">
@@ -201,14 +217,14 @@ export function AppShell({
               {profile?.name ?? 'Loading...'}
             </div>
             <div className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate">
-              {profile?.email ?? ''}
+              {isDemoMode ? 'Sample workspace' : profile?.email ?? ''}
             </div>
           </div>
           <button
             type="button"
             onClick={handleSignOut}
-            title="Sign out"
-            aria-label="Sign out"
+            title={isDemoMode ? 'Exit Demo' : 'Sign out'}
+            aria-label={isDemoMode ? 'Exit Demo' : 'Sign out'}
             className="p-1.5 rounded-md text-neutral-400 hover:text-red-500 hover:bg-neutral-100 dark:hover:bg-neutral-800/60 transition-colors cursor-pointer"
           >
             <LogOut className="h-4 w-4" />
@@ -331,6 +347,51 @@ export function AppShell({
             </Button>
           </div>
         </header>
+
+        {isDemoMode && (
+          <div
+            role="region"
+            aria-label="Demo mode controls"
+            className="border-b border-amber-500/30 bg-amber-500/10 dark:bg-amber-950/35 px-4 sm:px-6 py-2.5"
+          >
+            <div className="max-w-[1440px] mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 font-mono text-[11px] font-semibold tracking-wider text-amber-700 dark:text-amber-300 shrink-0">
+                  <Sparkles className="h-3 w-3" />
+                  <span>DEMO MODE</span>
+                </span>
+                <p className="text-xs text-neutral-700 dark:text-neutral-300 truncate">
+                  Interactive sample workspace saved locally in your browser — no account required.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {onResetDemo && (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={onResetDemo}
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>Reset Demo</span>
+                  </Button>
+                )}
+                {onExitDemo && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={onExitDemo}
+                    className="border border-neutral-300 dark:border-neutral-700"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    <span>Exit Demo</span>
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         <main className="flex-1 p-4 sm:p-6 max-w-[1440px] w-full mx-auto">
           {children}

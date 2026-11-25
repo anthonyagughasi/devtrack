@@ -1,6 +1,8 @@
 import { collection, getDocs, query, where } from 'firebase/firestore';
 import { firestoreDb, handleFirestoreError, OperationType } from '../lib/firebase';
 import type { ActivityItem } from '../types/app';
+import { assertNotDemoFirestoreLeak, isDemoProfile } from '../demo/demo-session';
+import { demoListWorkspaceActivity } from '../demo/demo-store';
 import { timestampToIso } from './firestore-helpers';
 import { getAccessibleProjectsRaw } from './projects';
 
@@ -13,6 +15,10 @@ export async function listWorkspaceActivity(
   page: number;
   totalPages: number;
 }> {
+  if (isDemoProfile(userId)) {
+    return demoListWorkspaceActivity(userId, options);
+  }
+  assertNotDemoFirestoreLeak(userId);
   const projects = await getAccessibleProjectsRaw(userId);
   const filteredProjects = options.projectId
     ? projects.filter((p) => p.id === options.projectId)

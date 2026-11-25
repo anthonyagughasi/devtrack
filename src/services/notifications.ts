@@ -16,6 +16,17 @@ import {
   handleFirestoreError,
   OperationType,
 } from '../lib/firebase';
+import {
+  assertNotDemoFirestoreLeak,
+  isDemoProfile,
+  isDemoSessionStored,
+  isDemoUserId,
+} from '../demo/demo-session';
+import {
+  demoGetUserNotifications,
+  demoMarkAllNotificationsRead,
+  demoMarkNotificationRead,
+} from '../demo/demo-store';
 import type { NotificationItem, UserProfile } from '../types/app';
 import { generateSecureToken, nullableIso, timestampToIso } from './firestore-helpers';
 
@@ -34,7 +45,15 @@ export async function sendProjectNotification(input: {
   link?: string | null;
   notificationId?: string;
 }): Promise<void> {
-  if (!input.recipientUid || !input.projectId) return;
+  if (
+    !input.recipientUid ||
+    !input.projectId ||
+    isDemoUserId(input.recipientUid) ||
+    isDemoUserId(input.actorUid) ||
+    isDemoSessionStored()
+  ) {
+    return;
+  }
   const notifId = input.notificationId ?? generateSecureToken(12);
   const path = `users/${input.recipientUid}/notifications/${notifId}`;
   try {
@@ -150,6 +169,10 @@ async function syncPendingNotificationsForUser(profile: UserProfile): Promise<vo
 export async function getUserNotifications(
   profile: UserProfile
 ): Promise<{ items: NotificationItem[]; unreadCount: number }> {
+  if (isDemoProfile(profile)) {
+    return demoGetUserNotifications(profile);
+  }
+  assertNotDemoFirestoreLeak(profile);
   await syncPendingNotificationsForUser(profile);
 
   const path = `users/${profile.uid}/notifications`;
@@ -198,6 +221,10 @@ export async function markNotificationRead(
   userId: string,
   notificationId: string
 ): Promise<void> {
+  if (isDemoProfile(userId)) {
+    return demoMarkNotificationRead(userId, notificationId);
+  }
+  assertNotDemoFirestoreLeak(userId);
   const path = `users/${userId}/notifications/${notificationId}`;
   const ref = doc(firestoreDb, 'users', userId, 'notifications', notificationId);
   let snap;
@@ -219,6 +246,10 @@ export async function markNotificationRead(
 }
 
 export async function markAllNotificationsRead(userId: string): Promise<void> {
+  if (isDemoProfile(userId)) {
+    return demoMarkAllNotificationsRead(userId);
+  }
+  assertNotDemoFirestoreLeak(userId);
   const path = `users/${userId}/notifications`;
   let snap;
   try {

@@ -7,6 +7,7 @@ import {
 } from 'firebase/auth';
 import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
 import appletFirebaseConfig from '../../firebase-applet-config.json';
+import { isDemoSessionStored } from '../demo/demo-session';
 
 export const firebaseClientConfig: FirebaseOptions = {
   apiKey: appletFirebaseConfig.apiKey,
@@ -129,7 +130,7 @@ export function formatClientError(error: unknown, fallback: string): string {
 }
 
 async function testConnection(): Promise<void> {
-  if (typeof window === 'undefined') return;
+  if (typeof window === 'undefined' || isDemoSessionStored()) return;
   try {
     await getDocFromServer(doc(firestoreDb, 'test', 'connection'));
   } catch (error) {
